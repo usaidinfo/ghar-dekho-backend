@@ -33,12 +33,19 @@ export const uploadDocument = multer({
   fileFilter: fileFilter(['application/pdf', 'image/jpeg', 'image/png']),
 });
 
-// Multiple images (up to 20)
+// Multiple images (up to 20) — field name must be `images`
 export const uploadMultipleImages = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: fileFilter(['image/jpeg', 'image/png', 'image/webp', 'image/jpg']),
 }).array('images', 20);
+
+// Property image upload: any file field name (images, file, photo, etc.) — max 20 files total
+export const uploadPropertyImageFiles = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024, files: 20 },
+  fileFilter: fileFilter(['image/jpeg', 'image/png', 'image/webp', 'image/jpg']),
+}).any();
 
 // Multer error handler middleware
 export const handleUploadError = (err, req, res, next) => {

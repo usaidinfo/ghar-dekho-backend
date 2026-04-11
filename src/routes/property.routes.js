@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { body, query } from 'express-validator';
 import { validate } from '../middleware/validate.js';
 import { protect, optionalAuth } from '../middleware/auth.js';
-import { uploadMultipleImages, handleUploadError } from '../middleware/upload.js';
+import { uploadPropertyImageFiles, handleUploadError } from '../middleware/upload.js';
 import {
   getProperties,
   getFeaturedProperties,
@@ -82,7 +82,7 @@ router.post(
   '/:id/images',
   protect,
   (req, res, next) => {
-    uploadMultipleImages(req, res, (err) => {
+    uploadPropertyImageFiles(req, res, (err) => {
       if (err) return handleUploadError(err, req, res, next);
       next();
     });
