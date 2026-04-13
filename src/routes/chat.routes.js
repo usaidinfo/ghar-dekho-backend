@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { body } from 'express-validator';
 import { validate } from '../middleware/validate.js';
 import { protect } from '../middleware/auth.js';
-import { uploadImage } from '../middleware/upload.js';
+import { uploadImage, handleUploadError } from '../middleware/upload.js';
 import {
   getChatSessions,
   createOrGetSession,
@@ -33,7 +33,12 @@ router.get('/sessions/:sessionId/messages', getMessages);
 // POST /api/chat/sessions/:sessionId/messages
 router.post(
   '/sessions/:sessionId/messages',
-  uploadImage.single('media'),
+  (req, res, next) => {
+    uploadImage.single('media')(req, res, (err) => {
+      if (err) return handleUploadError(err, req, res, next);
+      next();
+    });
+  },
   [body('content').optional()],
   sendMessage
 );

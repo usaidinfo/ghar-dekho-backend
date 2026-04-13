@@ -53,19 +53,62 @@ router.get('/:id', optionalAuth, getPropertyById);
 router.post(
   '/',
   protect,
+  // Allow multipart create with optional `images[]` in the same request
+  (req, res, next) => {
+    uploadPropertyImageFiles(req, res, (err) => {
+      if (err) return handleUploadError(err, req, res, next);
+      next();
+    });
+  },
+  (req, res, next) => {
+    // Helpful diagnostics for mobile multipart issues
+    try {
+      const ct = req.headers['content-type'];
+      const filesCount = Array.isArray(req.files) ? req.files.length : 0;
+      const keys = req.body && typeof req.body === 'object' ? Object.keys(req.body) : [];
+      console.log('POST /api/properties', { contentType: ct, filesCount, bodyKeys: keys.slice(0, 20) });
+    } catch {
+      // ignore
+    }
+    next();
+  },
   [
+    body('status').optional().isIn([
+      'DRAFT', 'ACTIVE', 'INACTIVE', 'SOLD', 'RENTED',
+      'UNDER_VERIFICATION', 'REJECTED', 'EXPIRED',
+    ]),
     body('title').trim().notEmpty().withMessage('Title is required'),
-    body('description').trim().notEmpty().withMessage('Description is required'),
+    body('description').custom((value, { req }) => {
+      if (req.body?.status === 'DRAFT') return true;
+      if (value == null || !String(value).trim()) throw new Error('Description is required');
+      return true;
+    }),
     body('propertyType').notEmpty().withMessage('Property type is required'),
     body('listingType').notEmpty().withMessage('Listing type required (BUY/RENT/PG/LEASE)'),
     body('price').isNumeric().withMessage('Price must be a number'),
-    body('address').trim().notEmpty().withMessage('Address is required'),
+    body('address').custom((value, { req }) => {
+      if (req.body?.status === 'DRAFT') return true;
+      if (value == null || !String(value).trim()) throw new Error('Address is required');
+      return true;
+    }),
     body('city').trim().notEmpty().withMessage('City is required'),
     body('state').trim().notEmpty().withMessage('State is required'),
     body('pincode').trim().notEmpty().withMessage('Pincode is required'),
     body('locality').trim().notEmpty().withMessage('Locality is required'),
-    body('latitude').isNumeric().withMessage('Latitude is required'),
-    body('longitude').isNumeric().withMessage('Longitude is required'),
+    body('latitude').custom((value, { req }) => {
+      if (req.body?.status === 'DRAFT') return true;
+      if (value === undefined || value === null || value === '' || Number.isNaN(Number(value))) {
+        throw new Error('Latitude is required');
+      }
+      return true;
+    }),
+    body('longitude').custom((value, { req }) => {
+      if (req.body?.status === 'DRAFT') return true;
+      if (value === undefined || value === null || value === '' || Number.isNaN(Number(value))) {
+        throw new Error('Longitude is required');
+      }
+      return true;
+    }),
   ],
   validate,
   createProperty

@@ -12,11 +12,17 @@ const fileFilter = (allowedTypes) => (req, file, cb) => {
   }
 };
 
-// Image upload (JPEG, PNG, WebP)
+// Image upload — allow any image/* (Android/iOS often send vendor-specific subtypes)
+const imageMimeFilter = (req, file, cb) => {
+  const m = (file.mimetype || '').toLowerCase();
+  if (m.startsWith('image/')) return cb(null, true);
+  cb(new Error('Invalid file type. Please choose an image.'), false);
+};
+
 export const uploadImage = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
-  fileFilter: fileFilter(['image/jpeg', 'image/png', 'image/webp', 'image/jpg']),
+  fileFilter: imageMimeFilter,
 });
 
 // Video upload (MP4, MOV, WebM)
@@ -44,7 +50,7 @@ export const uploadMultipleImages = multer({
 export const uploadPropertyImageFiles = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024, files: 20 },
-  fileFilter: fileFilter(['image/jpeg', 'image/png', 'image/webp', 'image/jpg']),
+  fileFilter: imageMimeFilter,
 }).any();
 
 // Multer error handler middleware

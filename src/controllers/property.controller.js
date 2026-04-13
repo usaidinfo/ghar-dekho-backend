@@ -3,6 +3,56 @@ import { success, error, paginated } from '../utils/response.js';
 import { getPagination, getPropertySort } from '../utils/pagination.js';
 import { uploadToCloudinary, deleteFromCloudinary, uploadMultipleImages } from '../services/cloudinary.service.js';
 
+/** Prisma `CommercialType` — must match schema exactly */
+const COMMERCIAL_TYPES = [
+  'OFFICE',
+  'SHOP',
+  'SHOWROOM',
+  'WAREHOUSE',
+  'RESTAURANT',
+  'HOTEL',
+  'INDUSTRIAL',
+  'OTHER',
+];
+
+/**
+ * @returns {{ value: string|null, error: string|null }}
+ */
+function normalizeCommercialTypeInput(raw) {
+  if (raw == null || raw === '') return { value: null, error: null };
+  let v = String(raw).trim().toUpperCase().replace(/-/g, '_');
+  if (v === 'OFFICE_SPACE' || v === 'OFFICESPACE') v = 'OFFICE';
+  if (COMMERCIAL_TYPES.includes(v)) return { value: v, error: null };
+  return {
+    value: null,
+    error: `Invalid commercialType "${raw}". Allowed: ${COMMERCIAL_TYPES.join(', ')}`,
+  };
+}
+
+/** Mobile list form sends short slugs; DB `Amenity.name` matches seed in `prisma/seed.js`. */
+const AMENITY_SLUG_TO_NAME = {
+  parking:  'Covered Parking',
+  gym:      'Gym / Fitness',
+  lift:     'Lift / Elevator',
+  pool:     'Swimming Pool',
+  security: 'Security / Guard',
+  backup:   'Power Backup',
+};
+
+async function resolveAmenityIdsFromSlugs(slugs) {
+  if (!Array.isArray(slugs) || !slugs.length) return [];
+  const names = [
+    ...new Set(
+      slugs
+        .map((s) => AMENITY_SLUG_TO_NAME[String(s).trim()])
+        .filter(Boolean),
+    ),
+  ];
+  if (!names.length) return [];
+  const rows = await prisma.amenity.findMany({ where: { name: { in: names } } });
+  return rows.map((r) => r.id);
+}
+
 // ─── Shared property select fields ───────────────────────────
 const PROPERTY_LIST_SELECT = {
   id:           true,
@@ -273,10 +323,10 @@ export const createProperty = async (req, res) => {
   try {
     const {
       title, description, propertyType, listingType, category,
-      price, priceNegotiable, address, city, state, pincode,
+      price, priceNegotiable, isPriceNegotiable, address, city, state, pincode,
       locality, landmark, latitude, longitude, googlePlaceId,
       bhk, bedrooms, bathrooms, balconies, carpetArea, builtUpArea,
-      superBuiltUpArea, plotArea, floorNumber, totalFloors,
+      superBuiltUpArea, plotArea, floorNumber, floor, totalFloors,
       facing, ageOfProperty, furnishing, availableFrom,
       deposit, monthlyRent, weeklyRent, maintenanceCharges,
       pgType, availableBeds, totalBeds, foodIncluded,
@@ -284,11 +334,68 @@ export const createProperty = async (req, res) => {
       commercialType, shopArea, officeArea, parkingSpaces,
       isRERAApproved, reraNumber, hasNOC, hasApprovedMaps,
       possessionStatus, autoRenew, amenityIds,
+      status: statusBody,
     } = req.body;
 
-    if (!latitude || !longitude) {
+    const ALLOWED_STATUS = new Set([
+      'DRAFT', 'ACTIVE', 'INACTIVE', 'SOLD', 'RENTED',
+      'UNDER_VERIFICATION', 'REJECTED', 'EXPIRED',
+    ]);
+    const status = ALLOWED_STATUS.has(statusBody) ? statusBody : 'ACTIVE';
+
+    let lat = latitude != null && String(latitude).trim() !== '' ? Number(latitude) : NaN;
+    let lon = longitude != null && String(longitude).trim() !== '' ? Number(longitude) : NaN;
+    if (status === 'DRAFT' && (!Number.isFinite(lat) || !Number.isFinite(lon))) {
+      lat = 20.5937;
+      lon = 78.9629;
+    } else if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
       return res.status(400).json(error('Location coordinates (latitude/longitude) are required.'));
     }
+
+    const commercialTypeNorm = normalizeCommercialTypeInput(commercialType);
+    if (commercialTypeNorm.error) {
+      return res.status(400).json(error(commercialTypeNorm.error));
+    }
+
+    const titleStr = String(title || '').trim();
+    const descTrim = description != null ? String(description).trim() : '';
+    const descFinal = descTrim || (status === 'DRAFT'
+      ? `${titleStr || 'Listing'} — draft on GharDekho.`
+      : '');
+
+    const addressFinal = (address && String(address).trim())
+      ? String(address).trim()
+      : [locality, city].filter(Boolean).join(', ');
+
+    let resolvedAmenityIds = Array.isArray(amenityIds) ? amenityIds.filter(Boolean) : [];
+    if (!resolvedAmenityIds.length && Array.isArray(req.body.amenitySlugs)) {
+      resolvedAmenityIds = await resolveAmenityIdsFromSlugs(req.body.amenitySlugs);
+    }
+
+    const pNeg =
+      priceNegotiable !== false &&
+      priceNegotiable !== 'false' &&
+      isPriceNegotiable !== false &&
+      isPriceNegotiable !== 'false';
+
+    const noc =
+      hasNOC === true ||
+      hasNOC === 'true' ||
+      req.body.nocFromSociety === true ||
+      req.body.nocFromSociety === 'true';
+    const maps =
+      hasApprovedMaps === true ||
+      hasApprovedMaps === 'true' ||
+      req.body.approvedMasterPlan === true ||
+      req.body.approvedMasterPlan === 'true';
+
+    const featured =
+      req.body.isFeatured === true ||
+      req.body.isFeatured === 'true' ||
+      req.body.requestFeatured === true ||
+      req.body.requestFeatured === 'true';
+
+    const floorNum = floorNumber ?? floor;
 
     // Set listing duration
     const expiresAt = new Date();
@@ -298,15 +405,23 @@ export const createProperty = async (req, res) => {
       data: {
         ownerId:      req.user.id,
         isOwnerListing: req.user.profileType === 'OWNER' || req.user.profileType === 'BUYER',
-        title, description, propertyType, listingType,
+        title:          titleStr,
+        description:    descFinal || `${titleStr} — listing on GharDekho.`,
+        propertyType, listingType,
+        status,
+        isFeatured: featured,
         category:     category || 'RESIDENTIAL',
         price:        Number(price),
-        priceNegotiable: priceNegotiable !== false,
+        priceNegotiable: pNeg,
         originalPrice: Number(price),
-        address, city, state, pincode, locality,
+        address:      addressFinal,
+        city,
+        state,
+        pincode,
+        locality,
         landmark, googlePlaceId,
-        latitude:  Number(latitude),
-        longitude: Number(longitude),
+        latitude:  lat,
+        longitude: lon,
         bhk:       bhk          ? Number(bhk) : null,
         bedrooms:  bedrooms     ? Number(bedrooms) : null,
         bathrooms: bathrooms    ? Number(bathrooms) : null,
@@ -315,7 +430,7 @@ export const createProperty = async (req, res) => {
         builtUpArea:     builtUpArea     ? Number(builtUpArea) : null,
         superBuiltUpArea:superBuiltUpArea? Number(superBuiltUpArea) : null,
         plotArea:        plotArea        ? Number(plotArea) : null,
-        floorNumber:     floorNumber     ? Number(floorNumber) : null,
+        floorNumber:     floorNum != null && floorNum !== '' ? Number(floorNum) : null,
         totalFloors:     totalFloors     ? Number(totalFloors) : null,
         ageOfProperty:   ageOfProperty   ? Number(ageOfProperty) : null,
         parkingSpaces:   parkingSpaces   ? Number(parkingSpaces) : null,
@@ -331,25 +446,62 @@ export const createProperty = async (req, res) => {
         totalBeds:       totalBeds       ? Number(totalBeds) : null,
         foodIncluded:    foodIncluded    ?? null,
         foodMenu, houseRules, checkInTimings, checkOutTimings,
-        commercialType:  commercialType  || null,
+        commercialType:  commercialTypeNorm.value,
         shopArea:        shopArea        ? Number(shopArea) : null,
         officeArea:      officeArea      ? Number(officeArea) : null,
         isRERAApproved:  isRERAApproved  === true || isRERAApproved === 'true',
         reraNumber:      reraNumber      || null,
-        hasNOC:          hasNOC          === true || hasNOC === 'true',
-        hasApprovedMaps: hasApprovedMaps === true || hasApprovedMaps === 'true',
+        hasNOC:          noc,
+        hasApprovedMaps: maps,
         possessionStatus:possessionStatus|| 'READY_TO_MOVE',
         autoRenew:       autoRenew       === true || autoRenew === 'true',
         expiresAt,
-        // Amenities
-        ...(amenityIds?.length && {
+        ...(resolvedAmenityIds.length && {
           amenities: {
-            create: amenityIds.map((id) => ({ amenityId: id })),
+            create: resolvedAmenityIds.map((id) => ({ amenityId: id })),
           },
         }),
       },
       select: PROPERTY_DETAIL_SELECT,
     });
+
+    // If images are provided in the same multipart request, upload + attach now.
+    if (Array.isArray(req.files) && req.files.length) {
+      try {
+        const uploadResults = await uploadMultipleImages(req.files, 'property-images');
+        await prisma.$transaction(
+          uploadResults.map((result, idx) =>
+            prisma.propertyImage.create({
+              data: {
+                propertyId:   property.id,
+                imageUrl:     result.secure_url,
+                thumbnailUrl: result.secure_url.replace('/upload/', '/upload/c_thumb,w_400/'),
+                publicId:     result.public_id,
+                isPrimary:    idx === 0,
+                order:        idx,
+                width:        result.width,
+                height:       result.height,
+                sizeBytes:    result.bytes,
+              },
+            }),
+          ),
+        );
+
+        const withImages = await prisma.property.findUnique({
+          where: { id: property.id },
+          select: PROPERTY_DETAIL_SELECT,
+        });
+
+        return res
+          .status(201)
+          .json(success(withImages || property, 'Property listed successfully!'));
+      } catch (imgErr) {
+        // Rollback property if "all-in-one" create fails
+        await prisma.property.delete({ where: { id: property.id } }).catch(() => {});
+        console.error('createProperty image upload error:', imgErr);
+        return res.status(500).json(error('Failed to upload images while creating property.'));
+      }
+    }
 
     return res.status(201).json(success(property, 'Property listed successfully!'));
   } catch (err) {
@@ -368,6 +520,12 @@ export const updateProperty = async (req, res) => {
     }
 
     const { amenityIds, ...updateData } = req.body;
+
+    if (Object.prototype.hasOwnProperty.call(updateData, 'commercialType')) {
+      const ct = normalizeCommercialTypeInput(updateData.commercialType);
+      if (ct.error) return res.status(400).json(error(ct.error));
+      updateData.commercialType = ct.value;
+    }
 
     // Track price history if price changed
     if (updateData.price && Number(updateData.price) !== existing.price) {

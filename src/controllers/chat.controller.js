@@ -193,6 +193,21 @@ export const sendMessage = async (req, res) => {
       data:  { lastMessageAt: new Date() },
     });
 
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`chat:${sessionId}`).emit('chat:message', message);
+      const otherId = session.user1Id === userId ? session.user2Id : session.user1Id;
+      io.to(`user:${otherId}`).emit('chat:notification', {
+        sessionId,
+        message: {
+          content:     message.content,
+          messageType: message.messageType,
+          senderId:    userId,
+          createdAt:   message.createdAt,
+        },
+      });
+    }
+
     return res.status(201).json(success(message, 'Message sent.'));
   } catch (err) {
     console.error('sendMessage error:', err);

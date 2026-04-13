@@ -24,6 +24,8 @@ const PORT       = process.env.PORT || 5000;
 
 // ── Socket.io ─────────────────────────────────────────────────
 export const io = initSocket(httpServer);
+/** Lets HTTP controllers (e.g. chat media upload) broadcast the same events as the socket handler */
+app.set('io', io);
 
 // ── Global Middleware ─────────────────────────────────────────
 app.use(helmet());
@@ -84,11 +86,12 @@ app.use((err, req, res, next) => {
 });
 
 // ── Start Server ──────────────────────────────────────────────
-httpServer.listen(PORT, () => {
+// Bind to all interfaces so Android devices/emulators can reach it.
+httpServer.listen(PORT, '0.0.0.0', () => {
   console.log('\n🏠 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('   Ghar Dekho Backend API');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log(`🚀 Server    : http://localhost:${PORT}`);
+  console.log(`🚀 Server    : http://localhost:${PORT} (bound 0.0.0.0)`);
   console.log(`🔗 Health    : http://localhost:${PORT}/health`);
   console.log(`🔌 Socket.io : ws://localhost:${PORT}`);
   console.log(`📝 Env       : ${process.env.NODE_ENV || 'development'}`);
