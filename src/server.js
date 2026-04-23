@@ -22,6 +22,17 @@ const app        = express();
 const httpServer = createServer(app);
 const PORT       = process.env.PORT || 5000;
 
+function parseAllowedOrigins(raw) {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+const allowedOrigins = parseAllowedOrigins(process.env.FRONTEND_URL);
+const allowAllOrigins = allowedOrigins.includes('*');
+
 // ── Socket.io ─────────────────────────────────────────────────
 export const io = initSocket(httpServer);
 /** Lets HTTP controllers (e.g. chat media upload) broadcast the same events as the socket handler */
@@ -32,7 +43,14 @@ app.use(helmet());
 app.use(compression());
 app.use(morgan('dev'));
 app.use(cors({
-  origin:      process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin: (origin, cb) => {
+    // React Native / mobile clients often omit Origin; allow them.
+    if (!origin) return cb(null, true);
+    if (allowAllOrigins) return cb(null, true);
+    if (allowedOrigins.length === 0) return cb(null, true);
+    if (allowedOrigins.includes(origin)) return cb(null, true);
+    return cb(new Error(`CORS blocked for origin: ${origin}`), false);
+  },
   credentials: true,
 }));
 app.use(express.json({ limit: '10mb' }));

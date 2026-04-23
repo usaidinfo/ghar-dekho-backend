@@ -2,14 +2,30 @@ import { Server } from 'socket.io';
 import { verifyToken } from '../utils/jwt.js';
 import prisma from './database.js';
 
+function parseAllowedOrigins(raw) {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
 export const initSocket = (httpServer) => {
+  const allowedOrigins = parseAllowedOrigins(process.env.FRONTEND_URL);
+  const allowAllOrigins = allowedOrigins.includes('*');
+
   const io = new Server(httpServer, {
     cors: {
       // React Native/socket.io handshake may not send an Origin header like browsers do.
-      // In development, allow all origins so mobile devices can connect.
-      origin:      process.env.NODE_ENV === 'development'
-        ? true
-        : (process.env.FRONTEND_URL || 'http://localhost:3000'),
+      // Allow missing Origin (mobile), and allowlist via FRONTEND_URL (comma-separated) if set.
+      origin: (origin, cb) => {
+        if (!origin) return cb(null, true);
+        if (process.env.NODE_ENV === 'development') return cb(null, true);
+        if (allowAllOrigins) return cb(null, true);
+        if (allowedOrigins.length === 0) return cb(null, true);
+        if (allowedOrigins.includes(origin)) return cb(null, true);
+        return cb(new Error(`Socket CORS blocked for origin: ${origin}`), false);
+      },
       credentials: true,
     },
     // Help avoid aggressive disconnects on mobile networks
