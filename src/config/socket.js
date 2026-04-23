@@ -5,9 +5,16 @@ import prisma from './database.js';
 export const initSocket = (httpServer) => {
   const io = new Server(httpServer, {
     cors: {
-      origin:      process.env.FRONTEND_URL || 'http://localhost:3000',
+      // React Native/socket.io handshake may not send an Origin header like browsers do.
+      // In development, allow all origins so mobile devices can connect.
+      origin:      process.env.NODE_ENV === 'development'
+        ? true
+        : (process.env.FRONTEND_URL || 'http://localhost:3000'),
       credentials: true,
     },
+    // Help avoid aggressive disconnects on mobile networks
+    pingInterval: 25000,
+    pingTimeout: 20000,
   });
 
   // Auth middleware for socket
@@ -37,13 +44,37 @@ export const initSocket = (httpServer) => {
 
   io.on('connection', (socket) => {
     console.log(`🔌 User connected: ${socket.userId}`);
+    try {
+      socket.conn.on('close', (reason) => {
+        console.log(`🔌 Engine close: ${socket.userId}`, { reason });
+      });
+      socket.conn.on('error', (err) => {
+        console.log(`🔌 Engine error: ${socket.userId}`, { message: err?.message });
+      });
+    } catch {
+      // ignore
+    }
 
     // Join personal room (for notifications)
     socket.join(`user:${socket.userId}`);
 
     // ── Join a chat room ──────────────────────────────────────
-    socket.on('chat:join', (sessionId) => {
-      socket.join(`chat:${sessionId}`);
+    socket.on('chat:join', async (sessionId, ack) => {
+      try {
+        // Optional server-side membership validation for better debugging
+        const s = await prisma.chatSession.findFirst({
+          where: { id: sessionId, OR: [{ user1Id: socket.userId }, { user2Id: socket.userId }] },
+          select: { id: true },
+        });
+        if (!s) {
+          if (typeof ack === 'function') ack({ ok: false, error: 'Session not found' });
+          return;
+        }
+        socket.join(`chat:${sessionId}`);
+        if (typeof ack === 'function') ack({ ok: true });
+      } catch (e) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Join failed' });
+      }
     });
 
     socket.on('chat:leave', (sessionId) => {
@@ -51,7 +82,7 @@ export const initSocket = (httpServer) => {
     });
 
     // ── Send message via socket ───────────────────────────────
-    socket.on('chat:message', async (data) => {
+    socket.on('chat:message', async (data, ack) => {
       try {
         const { sessionId, content, messageType = 'TEXT' } = data;
 
@@ -63,7 +94,10 @@ export const initSocket = (httpServer) => {
           },
         });
 
-        if (!session) return socket.emit('chat:error', { message: 'Session not found' });
+        if (!session) {
+          if (typeof ack === 'function') ack({ ok: false, error: 'Session not found' });
+          return socket.emit('chat:error', { message: 'Session not found' });
+        }
 
         const message = await prisma.message.create({
           data: { sessionId, senderId: socket.userId, content, messageType },
@@ -85,6 +119,10 @@ export const initSocket = (httpServer) => {
         // Emit to all in room
         io.to(`chat:${sessionId}`).emit('chat:message', message);
 
+        // Also emit to both users' personal rooms (covers cases where the client isn't joined to chat room yet)
+        io.to(`user:${session.user1Id}`).emit('chat:message', message);
+        io.to(`user:${session.user2Id}`).emit('chat:message', message);
+
         // Notify the other user if offline
         const otherId = session.user1Id === socket.userId ? session.user2Id : session.user1Id;
         io.to(`user:${otherId}`).emit('chat:notification', {
@@ -96,9 +134,11 @@ export const initSocket = (httpServer) => {
             createdAt:   message.createdAt,
           },
         });
+        if (typeof ack === 'function') ack({ ok: true, messageId: message.id });
       } catch (err) {
         console.error('Socket chat:message error:', err);
         socket.emit('chat:error', { message: 'Failed to send message' });
+        if (typeof ack === 'function') ack({ ok: false, error: 'Failed to send message' });
       }
     });
 
@@ -120,8 +160,8 @@ export const initSocket = (httpServer) => {
       socket.to(`chat:${sessionId}`).emit('chat:read', { sessionId, readBy: socket.userId });
     });
 
-    socket.on('disconnect', () => {
-      console.log(`🔌 User disconnected: ${socket.userId}`);
+    socket.on('disconnect', (reason) => {
+      console.log(`🔌 User disconnected: ${socket.userId}`, { reason });
     });
   });
 

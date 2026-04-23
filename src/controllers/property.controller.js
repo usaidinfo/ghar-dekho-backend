@@ -368,8 +368,12 @@ export const createProperty = async (req, res) => {
       : [locality, city].filter(Boolean).join(', ');
 
     let resolvedAmenityIds = Array.isArray(amenityIds) ? amenityIds.filter(Boolean) : [];
-    if (!resolvedAmenityIds.length && Array.isArray(req.body.amenitySlugs)) {
-      resolvedAmenityIds = await resolveAmenityIdsFromSlugs(req.body.amenitySlugs);
+    let amenitySlugInput = req.body.amenitySlugs;
+    if (typeof amenitySlugInput === 'string' && amenitySlugInput.trim()) {
+      amenitySlugInput = amenitySlugInput.split(',').map((s) => String(s).trim()).filter(Boolean);
+    }
+    if (!resolvedAmenityIds.length && Array.isArray(amenitySlugInput)) {
+      resolvedAmenityIds = await resolveAmenityIdsFromSlugs(amenitySlugInput);
     }
 
     const pNeg =

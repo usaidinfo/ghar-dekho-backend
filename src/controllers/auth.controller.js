@@ -15,11 +15,18 @@ export const sendOTP = async (req, res) => {
       return res.status(400).json(error('Email or phone is required.'));
     }
 
+    // Phone OTP: pending for now (Twilio config later)
+    if (phone && !email) {
+      return res
+        .status(501)
+        .json(error('Phone OTP is not enabled yet. Please use email OTP for now.', null, 'PHONE_OTP_PENDING'));
+    }
+
     const otp = await createOTP({ email, phone, type });
 
     // Send OTP via email (or SMS via Twilio if phone)
     if (email) {
-      await sendOTPEmail(email, otp, type).catch(console.error);
+      await sendOTPEmail(email, otp, type);
     }
 
     // In development, return OTP directly for easy testing
@@ -337,6 +344,12 @@ export const forgotPassword = async (req, res) => {
       return res.status(400).json(error('Email or phone required.'));
     }
 
+    if (phone && !email) {
+      return res
+        .status(501)
+        .json(error('Phone OTP is not enabled yet. Please use email for password reset.', null, 'PHONE_OTP_PENDING'));
+    }
+
     const user = await prisma.user.findFirst({
       where: {
         OR: [
@@ -354,7 +367,7 @@ export const forgotPassword = async (req, res) => {
     const otp = await createOTP({ userId: user.id, email, phone, type: 'PASSWORD_RESET' });
 
     if (email) {
-      await sendOTPEmail(email, otp, 'PASSWORD_RESET').catch(console.error);
+      await sendOTPEmail(email, otp, 'PASSWORD_RESET');
     }
 
     const devData = process.env.NODE_ENV === 'development' ? { otp } : {};

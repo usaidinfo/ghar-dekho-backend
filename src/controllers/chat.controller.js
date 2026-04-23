@@ -196,6 +196,9 @@ export const sendMessage = async (req, res) => {
     const io = req.app.get('io');
     if (io) {
       io.to(`chat:${sessionId}`).emit('chat:message', message);
+      // Also emit to both users' personal rooms (covers clients not currently joined to chat room)
+      io.to(`user:${session.user1Id}`).emit('chat:message', message);
+      io.to(`user:${session.user2Id}`).emit('chat:message', message);
       const otherId = session.user1Id === userId ? session.user2Id : session.user1Id;
       io.to(`user:${otherId}`).emit('chat:notification', {
         sessionId,
