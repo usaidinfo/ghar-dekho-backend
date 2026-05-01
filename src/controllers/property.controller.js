@@ -2,8 +2,8 @@ import prisma from '../config/database.js';
 import { success, error, paginated } from '../utils/response.js';
 import { getPagination, getPropertySort } from '../utils/pagination.js';
 import { uploadToCloudinary, deleteFromCloudinary, uploadMultipleImages } from '../services/cloudinary.service.js';
+import { isMembershipActive, maskPhone } from '../middleware/membership.js';
 
-/** Prisma `CommercialType` — must match schema exactly */
 const COMMERCIAL_TYPES = [
   'OFFICE',
   'SHOP',
@@ -53,7 +53,6 @@ async function resolveAmenityIdsFromSlugs(slugs) {
   return rows.map((r) => r.id);
 }
 
-// ─── Shared property select fields ───────────────────────────
 const PROPERTY_LIST_SELECT = {
   id:           true,
   title:        true,
@@ -311,7 +310,14 @@ export const getPropertyById = async (req, res) => {
       }).catch(() => {}); // don't fail on duplicate
     }
 
-    return res.json(success(property));
+    const viewerHasMembership = isMembershipActive(req.user);
+    const owner = property.owner ? { ...property.owner } : null;
+    if (owner && !viewerHasMembership) {
+      owner.phone = maskPhone(owner.phone);
+      owner.email = null;
+    }
+
+    return res.json(success({ ...property, owner, contactLocked: !viewerHasMembership }));
   } catch (err) {
     console.error('getPropertyById error:', err);
     return res.status(500).json(error('Failed to fetch property.'));

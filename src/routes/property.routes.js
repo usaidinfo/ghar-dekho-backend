@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { body, query } from 'express-validator';
 import { validate } from '../middleware/validate.js';
 import { protect, optionalAuth } from '../middleware/auth.js';
+import { requireActiveMembership } from '../middleware/membership.js';
 import { uploadPropertyImageFiles, handleUploadError } from '../middleware/upload.js';
 import {
   getProperties,
@@ -53,6 +54,7 @@ router.get('/:id', optionalAuth, getPropertyById);
 router.post(
   '/',
   protect,
+  requireActiveMembership,
   // Allow multipart create with optional `images[]` in the same request
   (req, res, next) => {
     uploadPropertyImageFiles(req, res, (err) => {
@@ -124,6 +126,7 @@ router.delete('/:id', protect, deleteProperty);
 router.post(
   '/:id/images',
   protect,
+  requireActiveMembership,
   (req, res, next) => {
     uploadPropertyImageFiles(req, res, (err) => {
       if (err) return handleUploadError(err, req, res, next);

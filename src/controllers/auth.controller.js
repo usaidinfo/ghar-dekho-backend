@@ -48,9 +48,34 @@ export const register = async (req, res) => {
       return res.status(400).json(error('Email or phone is required.'));
     }
 
-    // Verify OTP before registration
-    const otpType = email ? 'EMAIL_VERIFICATION' : 'PHONE_VERIFICATION';
-    const otpResult = await verifyOTP({ email, phone, otp, type: otpType });
+    const emailNorm = email ? String(email).trim().toLowerCase() : null;
+    const phoneRaw = phone ? String(phone).trim() : null;
+    const phoneDigits = phoneRaw ? phoneRaw.replace(/\D/g, '') : '';
+    const phoneNormalized = phoneRaw
+      ? (phoneRaw.startsWith('+')
+          ? phoneRaw
+          : phoneDigits.length === 10
+            ? `+91${phoneDigits}`
+            : phoneDigits.length >= 11
+              ? `+${phoneDigits}`
+              : phoneRaw)
+      : null;
+    const phoneVariants = phoneRaw
+      ? Array.from(new Set([
+          phoneRaw,
+          phoneDigits,
+          phoneDigits.length === 10 ? `+91${phoneDigits}` : null,
+          phoneDigits.length >= 11 ? `+${phoneDigits}` : null,
+        ].filter(Boolean)))
+      : [];
+
+    const otpType = emailNorm ? 'EMAIL_VERIFICATION' : 'PHONE_VERIFICATION';
+    const otpResult = await verifyOTP({
+      email: emailNorm,
+      phone: otpType === 'PHONE_VERIFICATION' ? phoneNormalized : null,
+      otp,
+      type: otpType,
+    });
     if (!otpResult.valid) {
       return res.status(400).json(error(otpResult.reason, null, 'INVALID_OTP'));
     }
@@ -59,8 +84,8 @@ export const register = async (req, res) => {
     const existing = await prisma.user.findFirst({
       where: {
         OR: [
-          ...(email ? [{ email }] : []),
-          ...(phone ? [{ phone }] : []),
+          ...(emailNorm ? [{ email: emailNorm }] : []),
+          ...(phoneVariants.length ? phoneVariants.map(p => ({ phone: p })) : []),
         ],
       },
     });
@@ -72,11 +97,11 @@ export const register = async (req, res) => {
 
     const user = await prisma.user.create({
       data: {
-        email,
-        phone,
+        email: emailNorm,
+        phone: phoneNormalized,
         password:         hashedPassword,
-        isEmailVerified:  !!email,
-        isPhoneVerified:  !!phone,
+        isEmailVerified:  !!emailNorm,
+        isPhoneVerified:  !!phoneNormalized,
         role:             profileType === 'AGENT' || profileType === 'BROKER' ? 'AGENT' : 'USER',
         profileType,
         profile: {
@@ -127,11 +152,22 @@ export const loginWithPassword = async (req, res) => {
   try {
     const { email, phone, password } = req.body;
 
+    const phoneRaw = phone ? String(phone).trim() : null;
+    const phoneDigits = phoneRaw ? phoneRaw.replace(/\D/g, '') : '';
+    const phoneVariants = phoneRaw
+      ? Array.from(new Set([
+          phoneRaw,
+          phoneDigits,
+          phoneDigits.length === 10 ? `+91${phoneDigits}` : null,
+          phoneDigits.length >= 11 ? `+${phoneDigits}` : null,
+        ].filter(Boolean)))
+      : [];
+
     const user = await prisma.user.findFirst({
       where: {
         OR: [
           ...(email ? [{ email }] : []),
-          ...(phone ? [{ phone }] : []),
+          ...(phoneVariants.length ? phoneVariants.map(p => ({ phone: p })) : []),
         ],
       },
       include: { profile: true },
@@ -183,7 +219,21 @@ export const loginWithOTP = async (req, res) => {
   try {
     const { email, phone, otp } = req.body;
 
-    const otpResult = await verifyOTP({ email, phone, otp, type: 'LOGIN' });
+    const emailNorm = email ? String(email).trim().toLowerCase() : null;
+    const phoneRaw = phone ? String(phone).trim() : null;
+    const phoneDigits = phoneRaw ? phoneRaw.replace(/\D/g, '') : '';
+    const phoneNormalized = phoneRaw
+      ? (phoneRaw.startsWith('+')
+          ? phoneRaw
+          : phoneDigits.length === 10
+            ? `+91${phoneDigits}`
+            : phoneDigits.length >= 11
+              ? `+${phoneDigits}`
+              : phoneRaw)
+      : null;
+
+    // LOGIN OTP is stored against whichever identifier was used to send it.
+    const otpResult = await verifyOTP({ email: emailNorm, phone: phoneNormalized, otp, type: 'LOGIN' });
     if (!otpResult.valid) {
       return res.status(400).json(error(otpResult.reason, null, 'INVALID_OTP'));
     }
@@ -191,8 +241,8 @@ export const loginWithOTP = async (req, res) => {
     let user = await prisma.user.findFirst({
       where: {
         OR: [
-          ...(email ? [{ email }] : []),
-          ...(phone ? [{ phone }] : []),
+          ...(emailNorm ? [{ email: emailNorm }] : []),
+          ...(phoneNormalized ? [{ phone: phoneNormalized }] : []),
         ],
       },
       include: { profile: true },

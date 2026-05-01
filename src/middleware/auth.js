@@ -32,6 +32,10 @@ export const protect = async (req, res, next) => {
         isBanned:    true,
         isEmailVerified: true,
         isPhoneVerified: true,
+        membershipStatus: true,
+        membershipExpiresAt: true,
+        verifiedBadge: true,
+        externalAdsServiceEnabled: true,
         profile:     { select: { firstName: true, lastName: true, profileImage: true } },
       },
     });
@@ -66,7 +70,16 @@ export const optionalAuth = async (req, res, next) => {
     }
     req.user = await prisma.user.findUnique({
       where: { id: payload.userId },
-      select: { id: true, role: true, profileType: true, isActive: true, isBanned: true },
+      select: {
+        id: true,
+        role: true,
+        profileType: true,
+        isActive: true,
+        isBanned: true,
+        membershipStatus: true,
+        membershipExpiresAt: true,
+        verifiedBadge: true,
+      },
     });
     next();
   } catch {
