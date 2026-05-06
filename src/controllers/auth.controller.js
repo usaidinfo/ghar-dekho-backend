@@ -15,22 +15,31 @@ export const sendOTP = async (req, res) => {
       return res.status(400).json(error('Email or phone is required.'));
     }
 
-    // Phone OTP: pending for now (Twilio config later)
+    // Phone OTP: requires SMS provider config (or enable dev-only returns).
     if (phone && !email) {
-      return res
-        .status(501)
-        .json(error('Phone OTP is not enabled yet. Please use email OTP for now.', null, 'PHONE_OTP_PENDING'));
+      const allowPhoneOtp =
+        process.env.NODE_ENV === 'development' ||
+        String(process.env.ALLOW_PHONE_OTP || '').toLowerCase() === 'true';
+      if (!allowPhoneOtp) {
+        return res
+          .status(501)
+          .json(error('Phone OTP is not enabled on this server yet.', null, 'PHONE_OTP_PENDING'));
+      }
     }
 
     const otp = await createOTP({ email, phone, type });
 
-    // Send OTP via email (or SMS via Twilio if phone)
+    // Send OTP via email (SMS provider can be integrated later)
     if (email) {
       await sendOTPEmail(email, otp, type);
     }
 
-    // In development, return OTP directly for easy testing
-    const devData = process.env.NODE_ENV === 'development' ? { otp } : {};
+    // In development (or when explicitly enabled), return OTP directly for easy testing
+    const devData =
+      process.env.NODE_ENV === 'development' ||
+      String(process.env.RETURN_OTP_IN_RESPONSE || '').toLowerCase() === 'true'
+        ? { otp }
+        : {};
 
     return res.json(success(devData, `OTP sent successfully to ${email || phone}`));
   } catch (err) {
@@ -249,7 +258,26 @@ export const loginWithOTP = async (req, res) => {
     });
 
     if (!user) {
-      return res.status(404).json(error('Account not found. Please register first.', null, 'USER_NOT_FOUND'));
+      // Auto-create user for OTP-only onboarding (no password required).
+      const suffix = uuidv4().slice(0, 6);
+      user = await prisma.user.create({
+        data: {
+          email: emailNorm,
+          phone: phoneNormalized,
+          password: null,
+          isEmailVerified: !!emailNorm,
+          isPhoneVerified: !!phoneNormalized,
+          role: 'USER',
+          profileType: 'BUYER',
+          profile: {
+            create: {
+              firstName: 'GharDekho',
+              lastName: `User-${suffix}`,
+            },
+          },
+        },
+        include: { profile: true },
+      });
     }
     if (user.isBanned) {
       return res.status(403).json(error('Account is banned. Contact support.', null, 'ACCOUNT_BANNED'));
