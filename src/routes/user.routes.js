@@ -12,6 +12,7 @@ import {
   getRecentlyViewed,
   getNotifications,
   markNotificationsRead,
+  addMyContact,
 } from '../controllers/user.controller.js';
 
 const router = Router();
@@ -47,6 +48,19 @@ router.put(
   [body('profileType').isIn(['OWNER', 'AGENT', 'BROKER', 'BUYER', 'RENTER']).withMessage('Invalid profile type')],
   validate,
   updateProfileType
+);
+
+// POST /api/users/me/contact  — add missing email or phone with OTP verification
+router.post(
+  '/me/contact',
+  protect,
+  [
+    body('email').optional().isEmail().withMessage('Valid email required'),
+    body('phone').optional().isMobilePhone().withMessage('Valid phone required'),
+    body('otp').notEmpty().withMessage('OTP is required'),
+  ],
+  validate,
+  addMyContact
 );
 
 // GET  /api/users/me/recently-viewed

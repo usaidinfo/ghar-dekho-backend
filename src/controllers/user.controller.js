@@ -1,6 +1,7 @@
 import prisma from '../config/database.js';
 import { success, error } from '../utils/response.js';
 import { uploadToCloudinary, deleteFromCloudinary } from '../services/cloudinary.service.js';
+import { verifyOTP } from '../services/otp.service.js';
 
 // ─── Get Current User ────────────────────────────────────────
 export const getMe = async (req, res) => {
@@ -290,6 +291,124 @@ export const getNotifications = async (req, res) => {
   } catch (err) {
     console.error('getNotifications error:', err);
     return res.status(500).json(error('Failed to fetch notifications.'));
+  }
+};
+
+// ─── Add Missing Contact (email or phone) via OTP ─────────────
+/**
+ * Attach a missing email or phone to the currently authenticated user.
+ *
+ * Body:  { email?: string, phone?: string, otp: string }
+ * Rules:
+ *  - Exactly one of `email` or `phone` must be provided.
+ *  - The user must NOT already have that contact set
+ *    (this endpoint is for "add when missing", not "change existing").
+ *  - The supplied OTP must be a valid EMAIL_VERIFICATION / PHONE_VERIFICATION
+ *    code created via /api/auth/send-otp for that identifier.
+ *  - The contact must be unique across users.
+ */
+export const addMyContact = async (req, res) => {
+  try {
+    const { email, phone, otp } = req.body;
+
+    if ((!email && !phone) || (email && phone)) {
+      return res
+        .status(400)
+        .json(error('Provide either email OR phone (not both).', null, 'BAD_REQUEST'));
+    }
+    if (!otp) {
+      return res.status(400).json(error('OTP is required.', null, 'BAD_REQUEST'));
+    }
+
+    const emailNorm = email ? String(email).trim().toLowerCase() : null;
+    const phoneRaw = phone ? String(phone).trim() : null;
+    const phoneDigits = phoneRaw ? phoneRaw.replace(/\D/g, '') : '';
+    const phoneNormalized = phoneRaw
+      ? phoneRaw.startsWith('+')
+        ? phoneRaw
+        : phoneDigits.length === 10
+          ? `+91${phoneDigits}`
+          : phoneDigits.length >= 11
+            ? `+${phoneDigits}`
+            : phoneRaw
+      : null;
+
+    // Reject if user already has this contact set.
+    const current = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { email: true, phone: true },
+    });
+    if (!current) {
+      return res.status(404).json(error('User not found.'));
+    }
+    if (emailNorm && current.email) {
+      return res
+        .status(409)
+        .json(error('Email is already set on this account.', null, 'EMAIL_EXISTS'));
+    }
+    if (phoneNormalized && current.phone) {
+      return res
+        .status(409)
+        .json(error('Phone is already set on this account.', null, 'PHONE_EXISTS'));
+    }
+
+    // Reject if another account already uses it.
+    const taken = await prisma.user.findFirst({
+      where: {
+        OR: [
+          ...(emailNorm ? [{ email: emailNorm }] : []),
+          ...(phoneNormalized ? [{ phone: phoneNormalized }] : []),
+        ],
+        NOT: { id: req.user.id },
+      },
+      select: { id: true },
+    });
+    if (taken) {
+      return res
+        .status(409)
+        .json(
+          error(
+            emailNorm
+              ? 'This email is already in use by another account.'
+              : 'This phone number is already in use by another account.',
+            null,
+            'CONTACT_TAKEN',
+          ),
+        );
+    }
+
+    // Verify OTP (issued with EMAIL_VERIFICATION or PHONE_VERIFICATION type).
+    const otpType = emailNorm ? 'EMAIL_VERIFICATION' : 'PHONE_VERIFICATION';
+    const otpResult = await verifyOTP({
+      email: emailNorm,
+      phone: phoneNormalized,
+      otp,
+      type: otpType,
+    });
+    if (!otpResult.valid) {
+      return res.status(400).json(error(otpResult.reason, null, 'INVALID_OTP'));
+    }
+
+    // Attach + mark verified.
+    const updated = await prisma.user.update({
+      where: { id: req.user.id },
+      data: {
+        ...(emailNorm ? { email: emailNorm, isEmailVerified: true } : {}),
+        ...(phoneNormalized ? { phone: phoneNormalized, isPhoneVerified: true } : {}),
+      },
+      select: {
+        id: true,
+        email: true,
+        phone: true,
+        isEmailVerified: true,
+        isPhoneVerified: true,
+      },
+    });
+
+    return res.json(success(updated, 'Contact added successfully.'));
+  } catch (err) {
+    console.error('addMyContact error:', err);
+    return res.status(500).json(error('Failed to add contact.'));
   }
 };
 
