@@ -5,6 +5,7 @@ import { signAccessToken, signRefreshToken, verifyToken } from '../utils/jwt.js'
 import { success, error } from '../utils/response.js';
 import { createOTP, verifyOTP } from '../services/otp.service.js';
 import { sendOTPEmail, sendWelcomeEmail } from '../services/email.service.js';
+import { sendOTPSMS, isMsg91Configured } from '../services/sms.service.js';
 
 // ─── Send OTP ────────────────────────────────────────────────
 export const sendOTP = async (req, res) => {
@@ -15,9 +16,30 @@ export const sendOTP = async (req, res) => {
       return res.status(400).json(error('Email or phone is required.'));
     }
 
-    // Phone OTP: requires SMS provider config (or enable dev-only returns).
-    if (phone && !email) {
+    // Normalize identifiers consistently across send / verify paths.
+    // Without this, the OTP would be stored against `9876543210` here but
+    // looked up as `+919876543210` during verifyOTP — never matching.
+    const emailNorm = email ? String(email).trim().toLowerCase() : null;
+    const phoneRaw = phone ? String(phone).trim() : null;
+    const phoneDigits = phoneRaw ? phoneRaw.replace(/\D/g, '') : '';
+    const phoneNormalized = phoneRaw
+      ? phoneRaw.startsWith('+')
+        ? phoneRaw
+        : phoneDigits.length === 10
+          ? `+91${phoneDigits}`
+          : phoneDigits.length >= 11
+            ? `+${phoneDigits}`
+            : phoneRaw
+      : null;
+
+    // Phone OTP path: require either MSG91 to be configured, or an explicit
+    // dev/staging opt-in. This prevents accidentally "succeeding" silently
+    // in production when no SMS provider exists.
+    const isPhoneOnly = !!phoneNormalized && !emailNorm;
+    const msg91Ready = isMsg91Configured();
+    if (isPhoneOnly) {
       const allowPhoneOtp =
+        msg91Ready ||
         process.env.NODE_ENV === 'development' ||
         String(process.env.ALLOW_PHONE_OTP || '').toLowerCase() === 'true';
       if (!allowPhoneOtp) {
@@ -27,21 +49,45 @@ export const sendOTP = async (req, res) => {
       }
     }
 
-    const otp = await createOTP({ email, phone, type });
+    const otp = await createOTP({
+      email: emailNorm,
+      phone: phoneNormalized,
+      type,
+    });
 
-    // Send OTP via email (SMS provider can be integrated later)
-    if (email) {
-      await sendOTPEmail(email, otp, type);
+    // Email channel
+    if (emailNorm) {
+      await sendOTPEmail(emailNorm, otp, type);
     }
 
-    // In development (or when explicitly enabled), return OTP directly for easy testing
-    const devData =
-      process.env.NODE_ENV === 'development' ||
-      String(process.env.RETURN_OTP_IN_RESPONSE || '').toLowerCase() === 'true'
-        ? { otp }
-        : {};
+    // SMS channel (MSG91)
+    let smsError = null;
+    if (phoneNormalized && msg91Ready) {
+      const smsRes = await sendOTPSMS(phoneNormalized, otp);
+      if (!smsRes.ok) {
+        smsError = smsRes.reason;
+        // Hard-fail in production — we don't want to lie to the user about
+        // having sent something we didn't. In dev we still surface the OTP
+        // via devData below so engineering work isn't blocked.
+        if (process.env.NODE_ENV === 'production') {
+          return res
+            .status(502)
+            .json(error(`Failed to deliver OTP via SMS: ${smsError}`, null, 'SMS_DELIVERY_FAILED'));
+        }
+      }
+    }
 
-    return res.json(success(devData, `OTP sent successfully to ${email || phone}`));
+    // In development (or when explicitly enabled), return OTP directly for
+    // easy testing. Never expose in production unless RETURN_OTP_IN_RESPONSE
+    // is explicitly set to true.
+    const exposeOtp =
+      process.env.NODE_ENV === 'development' ||
+      String(process.env.RETURN_OTP_IN_RESPONSE || '').toLowerCase() === 'true';
+    const devData = exposeOtp ? { otp, ...(smsError ? { smsError } : {}) } : {};
+
+    return res.json(
+      success(devData, `OTP sent successfully to ${emailNorm || phoneNormalized}`),
+    );
   } catch (err) {
     console.error('sendOTP error:', err);
     return res.status(500).json(error('Failed to send OTP.'));
