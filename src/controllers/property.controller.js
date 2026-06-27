@@ -3,6 +3,7 @@ import { success, error, paginated } from '../utils/response.js';
 import { getPagination, getPropertySort } from '../utils/pagination.js';
 import { uploadToCloudinary, deleteFromCloudinary, uploadMultipleImages } from '../services/cloudinary.service.js';
 import { isMembershipActive, maskPhone } from '../middleware/membership.js';
+import { assertCanCreateListing, assertCanUploadImages } from '../services/membership.service.js';
 
 const COMMERCIAL_TYPES = [
   'OFFICE',
@@ -311,13 +312,20 @@ export const getPropertyById = async (req, res) => {
     }
 
     const viewerHasMembership = isMembershipActive(req.user);
+    const isOwnerViewingOwn = req.user?.id === property.ownerId;
     const owner = property.owner ? { ...property.owner } : null;
-    if (owner && !viewerHasMembership) {
+    if (owner && !viewerHasMembership && !isOwnerViewingOwn) {
       owner.phone = maskPhone(owner.phone);
       owner.email = null;
     }
 
-    return res.json(success({ ...property, owner, contactLocked: !viewerHasMembership }));
+    return res.json(
+      success({
+        ...property,
+        owner,
+        contactLocked: !viewerHasMembership && !isOwnerViewingOwn,
+      }),
+    );
   } catch (err) {
     console.error('getPropertyById error:', err);
     return res.status(500).json(error('Failed to fetch property.'));
@@ -327,6 +335,14 @@ export const getPropertyById = async (req, res) => {
 // ─── CREATE Property ──────────────────────────────────────────
 export const createProperty = async (req, res) => {
   try {
+    try {
+      await assertCanCreateListing(req.user.id);
+    } catch (limitErr) {
+      return res
+        .status(limitErr.status || 403)
+        .json(error(limitErr.message, limitErr.meta ?? null, limitErr.code || 'FORBIDDEN'));
+    }
+
     const {
       title, description, propertyType, listingType, category,
       price, priceNegotiable, isPriceNegotiable, address, city, state, pincode,
@@ -414,7 +430,7 @@ export const createProperty = async (req, res) => {
     const property = await prisma.property.create({
       data: {
         ownerId:      req.user.id,
-        isOwnerListing: req.user.profileType === 'OWNER' || req.user.profileType === 'BUYER',
+        isOwnerListing: ['OWNER', 'BUYER', 'BUILDER'].includes(req.user.profileType),
         title:          titleStr,
         description:    descFinal || `${titleStr} — listing on GharDekho.`,
         propertyType, listingType,
@@ -603,11 +619,15 @@ export const uploadPropertyImages = async (req, res) => {
       return res.status(403).json(error('Not authorized.'));
     }
 
-    // Check existing image count
-    const existingCount = await prisma.propertyImage.count({ where: { propertyId: req.params.id } });
-    if (existingCount + req.files.length > 20) {
-      return res.status(400).json(error(`Max 20 images allowed. Currently ${existingCount}.`));
+    try {
+      await assertCanUploadImages(req.user.id, req.params.id, req.files.length);
+    } catch (limitErr) {
+      return res
+        .status(limitErr.status || 403)
+        .json(error(limitErr.message, limitErr.meta ?? null, limitErr.code || 'FORBIDDEN'));
     }
+
+    const existingCount = await prisma.propertyImage.count({ where: { propertyId: req.params.id } });
 
     const uploadResults = await uploadMultipleImages(req.files, 'property-images');
     const hasPrimary = await prisma.propertyImage.findFirst({

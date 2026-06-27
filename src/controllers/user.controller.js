@@ -2,6 +2,7 @@ import prisma from '../config/database.js';
 import { success, error } from '../utils/response.js';
 import { uploadToCloudinary, deleteFromCloudinary } from '../services/cloudinary.service.js';
 import { verifyOTP } from '../services/otp.service.js';
+import { formatMembershipPayload, loadUserMembershipContext } from '../services/membership.service.js';
 
 // ─── Get Current User ────────────────────────────────────────
 export const getMe = async (req, res) => {
@@ -18,6 +19,9 @@ export const getMe = async (req, res) => {
         isPhoneVerified: true,
         isKYCVerified:   true,
         kycStatus:       true,
+        membershipStatus: true,
+        membershipExpiresAt: true,
+        verifiedBadge:   true,
         lastLoginAt:     true,
         createdAt:       true,
         profile:         true,
@@ -45,7 +49,16 @@ export const getMe = async (req, res) => {
     });
 
     if (!user) return res.status(404).json(error('User not found.'));
-    return res.json(success(user));
+
+    const membershipCtx = await loadUserMembershipContext(user.id);
+    const membership = formatMembershipPayload(membershipCtx);
+
+    // adsEnabled: false for active paid members; true for free/inactive users.
+    // The mobile app uses this to gate all ad placements — a paid member
+    // will never see banners, interstitials, or app open ads.
+    const adsEnabled = membership?.status !== 'ACTIVE';
+
+    return res.json(success({ ...user, membership, adsEnabled }));
   } catch (err) {
     console.error('getMe error:', err);
     return res.status(500).json(error('Failed to fetch profile.'));
@@ -197,12 +210,14 @@ export const getUserById = async (req, res) => {
 export const updateProfileType = async (req, res) => {
   try {
     const { profileType } = req.body;
-    const validTypes = ['OWNER', 'AGENT', 'BROKER', 'BUYER', 'RENTER'];
+    const validTypes = ['OWNER', 'AGENT', 'BROKER', 'BUILDER', 'BUYER', 'RENTER'];
     if (!validTypes.includes(profileType)) {
       return res.status(400).json(error('Invalid profile type.'));
     }
 
-    const newRole = (profileType === 'AGENT' || profileType === 'BROKER') ? 'AGENT' : 'USER';
+    const newRole = (profileType === 'AGENT' || profileType === 'BROKER' || profileType === 'BUILDER')
+      ? 'AGENT'
+      : 'USER';
 
     const user = await prisma.user.update({
       where: { id: req.user.id },
@@ -210,7 +225,7 @@ export const updateProfileType = async (req, res) => {
       select: { id: true, role: true, profileType: true },
     });
 
-    // Auto-create agent profile if switching to agent/broker
+    // Auto-create agent profile if switching to agent/broker/builder
     if (newRole === 'AGENT') {
       await prisma.agentProfile.upsert({
         where:  { userId: req.user.id },

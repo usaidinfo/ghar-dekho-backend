@@ -17,6 +17,7 @@ import propertyRoutes from './routes/property.routes.js';
 import wishlistRoutes from './routes/wishlist.routes.js';
 import chatRoutes     from './routes/chat.routes.js';
 import meetingRoutes  from './routes/meeting.routes.js';
+import membershipRoutes from './routes/membership.routes.js';
 
 const app        = express();
 const httpServer = createServer(app);
@@ -75,6 +76,7 @@ app.use('/api/properties', propertyRoutes);
 app.use('/api/wishlist',   wishlistRoutes);
 app.use('/api/chat',       chatRoutes);
 app.use('/api/meetings',   meetingRoutes);
+app.use('/api/membership', membershipRoutes);
 
 // ── 404 Handler ───────────────────────────────────────────────
 app.use((req, res) => {
@@ -128,7 +130,9 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   console.log('   POST /api/properties');
   console.log('   GET  /api/wishlist');
   console.log('   GET  /api/chat/sessions');
-  console.log('   GET  /api/meetings');
+  console.log('   GET  /api/membership/plans');
+  console.log('   GET  /api/membership/status');
+  console.log('   POST /api/membership/activate-demo');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 });
 

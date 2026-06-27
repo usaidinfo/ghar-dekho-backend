@@ -45,7 +45,7 @@ router.post(
 router.put(
   '/me/profile-type',
   protect,
-  [body('profileType').isIn(['OWNER', 'AGENT', 'BROKER', 'BUYER', 'RENTER']).withMessage('Invalid profile type')],
+  [body('profileType').isIn(['OWNER', 'AGENT', 'BROKER', 'BUILDER', 'BUYER', 'RENTER']).withMessage('Invalid profile type')],
   validate,
   updateProfileType
 );

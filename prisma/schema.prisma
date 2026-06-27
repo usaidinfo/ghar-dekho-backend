@@ -39,6 +39,7 @@ model User {
   // Membership (paid subscription gating)
   membershipStatus    SubscriptionStatus @default(INACTIVE)
   membershipExpiresAt DateTime?
+  membershipPlanId    String?
   verifiedBadge       Boolean     @default(false)
   externalAdsServiceEnabled Boolean @default(false)
   createdAt           DateTime    @default(now())
@@ -61,6 +62,7 @@ model User {
   meetingsAsAttendee  Meeting[]   @relation("MeetingAttendee")
   notifications       Notification[]
   subscriptions       Subscription[]
+  membershipPlan      SubscriptionPlan? @relation("UserMembershipPlan", fields: [membershipPlanId], references: [id], onDelete: SetNull)
   agentProfile        AgentProfile?
   ownedLeads          LeadManagement[] @relation("LeadOwner")
   buyerLeads          LeadManagement[] @relation("LeadBuyer")
@@ -98,6 +100,7 @@ enum ProfileType {
   OWNER
   AGENT
   BROKER
+  BUILDER
   BUYER
   RENTER
 }
@@ -946,10 +949,12 @@ model SubscriptionPlan {
   name          String    @unique
   description   String?   @db.Text
   planType      PlanType
+  accountType   MembershipAccountType?
+  planTier      MembershipPlanTier?
   duration      Int       // in days
   price         Float
   currency      String    @default("INR")
-  features      Json      // Object with feature flags
+  features      Json      // Object with feature flags + maxPhotos, maxVideos, etc.
   maxListings   Int       @default(5)
   maxFeatured   Int       @default(0)
   maxBoosts     Int       @default(0)
@@ -964,13 +969,29 @@ model SubscriptionPlan {
   updatedAt     DateTime  @updatedAt
 
   subscriptions Subscription[]
+  members       User[]    @relation("UserMembershipPlan")
 
+  @@unique([accountType, planTier])
   @@index([planType])
   @@index([isActive])
+  @@index([accountType])
+}
+
+enum MembershipAccountType {
+  OWNER
+  BROKER
+  BUILDER
+}
+
+enum MembershipPlanTier {
+  BASIC
+  MEDIUM
+  PREMIUM
 }
 
 enum PlanType {
   BASIC
+  MEDIUM
   PREMIUM
   AGENT_BASIC
   AGENT_PREMIUM
