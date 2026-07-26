@@ -15,6 +15,7 @@ import {
   uploadPropertyImages,
   deletePropertyImage,
   getMyListings,
+  getMyAnalytics,
   searchProperties,
   getSearchSuggestions,
   getNearbyProperties,
@@ -44,6 +45,9 @@ router.get('/nearby', getNearbyProperties);
 
 // GET /api/properties/my-listings  (protected)
 router.get('/my-listings', protect, getMyListings);
+
+// GET /api/properties/my-analytics?period=7D|30D|90D
+router.get('/my-analytics', protect, getMyAnalytics);
 
 // GET /api/properties/:id
 router.get('/:id', optionalAuth, getPropertyById);

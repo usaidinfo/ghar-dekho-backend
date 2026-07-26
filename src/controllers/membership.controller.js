@@ -4,6 +4,7 @@ import {
   formatMembershipPayload,
   listMembershipPlans,
   loadUserMembershipContext,
+  upgradeMembership,
 } from '../services/membership.service.js';
 
 const VALID_ACCOUNT_TYPES = ['OWNER', 'BROKER', 'BUILDER'];
@@ -125,5 +126,45 @@ export const renewDemoMembership = async (req, res) => {
   } catch (err) {
     console.error('renewDemoMembership error:', err);
     return res.status(err.status || 500).json(error(err.message || 'Failed to renew membership.'));
+  }
+};
+
+/** POST /api/membership/upgrade-demo — switch to a higher tier */
+export const upgradeDemoMembership = async (req, res) => {
+  try {
+    if (!demoActivationAllowed()) {
+      return res.status(403).json(error('Demo membership upgrade is disabled.', null, 'FORBIDDEN'));
+    }
+
+    const planTier = String(req.body.planTier || '').toUpperCase();
+    if (!VALID_PLAN_TIERS.includes(planTier)) {
+      return res.status(400).json(error('planTier must be BASIC, MEDIUM, or PREMIUM.'));
+    }
+
+    const result = await upgradeMembership({
+      userId: req.user.id,
+      planTier,
+      source: 'DEMO_UPGRADE',
+    });
+
+    const refreshed = await loadUserMembershipContext(req.user.id);
+
+    return res.json(
+      success(
+        {
+          ...formatMembershipPayload(refreshed),
+          subscriptionId: result.subscription.id,
+        },
+        'Membership upgraded successfully.',
+      ),
+    );
+  } catch (err) {
+    console.error('upgradeDemoMembership error:', err);
+    if (err.code === 'PLAN_NOT_FOUND') {
+      return res.status(404).json(error(err.message, null, err.code));
+    }
+    return res
+      .status(err.status || 500)
+      .json(error(err.message || 'Failed to upgrade membership.', err.meta ?? null, err.code));
   }
 };

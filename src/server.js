@@ -18,6 +18,10 @@ import wishlistRoutes from './routes/wishlist.routes.js';
 import chatRoutes     from './routes/chat.routes.js';
 import meetingRoutes  from './routes/meeting.routes.js';
 import membershipRoutes from './routes/membership.routes.js';
+import agentRoutes from './routes/agent.routes.js';
+import promotionRoutes from './routes/promotion.routes.js';
+import alertRoutes from './routes/alert.routes.js';
+import rentRoutes from './routes/rent.routes.js';
 
 const app        = express();
 const httpServer = createServer(app);
@@ -77,6 +81,10 @@ app.use('/api/wishlist',   wishlistRoutes);
 app.use('/api/chat',       chatRoutes);
 app.use('/api/meetings',   meetingRoutes);
 app.use('/api/membership', membershipRoutes);
+app.use('/api/agent', agentRoutes);
+app.use('/api/promotions', promotionRoutes);
+app.use('/api/alerts', alertRoutes);
+app.use('/api/rent', rentRoutes);
 
 // ── 404 Handler ───────────────────────────────────────────────
 app.use((req, res) => {
@@ -128,11 +136,23 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   console.log('   GET  /api/properties/trending-areas');
   console.log('   GET  /api/properties/nearby');
   console.log('   POST /api/properties');
+  console.log('   GET  /api/properties/my-analytics');
+  console.log('   GET  /api/rent/reminders');
   console.log('   GET  /api/wishlist');
   console.log('   GET  /api/chat/sessions');
   console.log('   GET  /api/membership/plans');
   console.log('   GET  /api/membership/status');
   console.log('   POST /api/membership/activate-demo');
+  console.log('   POST /api/membership/upgrade-demo');
+  console.log('   GET  /api/agent/dashboard');
+  console.log('   GET  /api/agent/leads');
+  console.log('   GET  /api/agent/listings');
+  console.log('   GET  /api/agent/analytics');
+  console.log('   GET  /api/agent/team');
+  console.log('   GET  /api/agent/agency-profile');
+  console.log('   GET  /api/promotions/credits');
+  console.log('   POST /api/promotions/properties/:id/boost');
+  console.log('   POST /api/promotions/properties/:id/feature');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 });
 

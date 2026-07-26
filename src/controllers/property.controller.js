@@ -4,6 +4,7 @@ import { getPagination, getPropertySort } from '../utils/pagination.js';
 import { uploadToCloudinary, deleteFromCloudinary, uploadMultipleImages } from '../services/cloudinary.service.js';
 import { isMembershipActive, maskPhone } from '../middleware/membership.js';
 import { assertCanCreateListing, assertCanUploadImages } from '../services/membership.service.js';
+import { getOwnerAnalytics } from '../services/sellerAnalytics.service.js';
 
 const COMMERCIAL_TYPES = [
   'OFFICE',
@@ -731,6 +732,19 @@ export const getMyListings = async (req, res) => {
   } catch (err) {
     console.error('getMyListings error:', err);
     return res.status(500).json(error('Failed to fetch your listings.'));
+  }
+};
+
+/** GET /api/properties/my-analytics?period=7D|30D|90D */
+export const getMyAnalytics = async (req, res) => {
+  try {
+    const data = await getOwnerAnalytics(req.user.id, {
+      period: req.query.period || '30D',
+    });
+    return res.json(success(data));
+  } catch (err) {
+    console.error('getMyAnalytics error:', err);
+    return res.status(500).json(error('Failed to load seller analytics.'));
   }
 };
 

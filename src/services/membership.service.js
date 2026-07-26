@@ -197,20 +197,21 @@ export async function activateMembership({
     });
 
     if (AGENT_PROFILE_TYPES.has(profileType)) {
+      const agentVerified = Boolean(plan.hasVerifiedBadge);
       await tx.agentProfile.upsert({
         where: { userId },
         update: {
           subscriptionPlanId: plan.id,
           subscriptionStatus: 'ACTIVE',
           subscriptionExpiresAt: endDate,
-          verifiedBadge: plan.hasVerifiedBadge ? 'VERIFIED' : null,
+          verifiedBadge: agentVerified,
         },
         create: {
-          userId,
+          user: { connect: { id: userId } },
           subscriptionPlanId: plan.id,
           subscriptionStatus: 'ACTIVE',
           subscriptionExpiresAt: endDate,
-          verifiedBadge: plan.hasVerifiedBadge ? 'VERIFIED' : null,
+          verifiedBadge: agentVerified,
         },
       });
     }
@@ -221,10 +222,65 @@ export async function activateMembership({
   return result;
 }
 
+const TIER_RANK = { BASIC: 1, MEDIUM: 2, PREMIUM: 3 };
+
+/**
+ * Upgrade an active membership to a higher tier (same account type).
+ * Restarts the billing period on the new plan (demo / pre-Razorpay).
+ */
+export async function upgradeMembership({ userId, planTier, source = 'DEMO_UPGRADE' }) {
+  const ctx = await loadUserMembershipContext(userId);
+  if (!ctx?.active) {
+    const err = new Error('Active membership required before upgrading.');
+    err.status = 402;
+    err.code = 'MEMBERSHIP_REQUIRED';
+    throw err;
+  }
+
+  const current = ctx.user.membershipPlan;
+  if (!current?.accountType || !current?.planTier) {
+    const err = new Error('No current plan found to upgrade from.');
+    err.status = 400;
+    err.code = 'NO_CURRENT_PLAN';
+    throw err;
+  }
+
+  const nextTier = String(planTier || '').toUpperCase();
+  const currentRank = TIER_RANK[current.planTier] ?? 0;
+  const nextRank = TIER_RANK[nextTier] ?? 0;
+
+  if (!nextRank) {
+    const err = new Error('Invalid plan tier.');
+    err.status = 400;
+    err.code = 'INVALID_TIER';
+    throw err;
+  }
+
+  if (nextRank <= currentRank) {
+    const err = new Error(
+      `Choose a higher plan than ${current.planTier}. Downgrades are not available here.`,
+    );
+    err.status = 400;
+    err.code = 'UPGRADE_ONLY';
+    err.meta = { currentTier: current.planTier, requestedTier: nextTier };
+    throw err;
+  }
+
+  return activateMembership({
+    userId,
+    accountType: current.accountType,
+    planTier: nextTier,
+    source,
+  });
+}
+
 export async function assertCanCreateListing(userId) {
   const ctx = await loadUserMembershipContext(userId);
   if (!ctx?.active) {
-    return ctx;
+    const err = new Error('Membership required. Please upgrade to list a property.');
+    err.status = 402;
+    err.code = 'MEMBERSHIP_REQUIRED';
+    throw err;
   }
 
   const { limits, usage } = ctx;

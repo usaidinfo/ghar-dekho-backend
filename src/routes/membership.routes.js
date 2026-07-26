@@ -7,6 +7,7 @@ import {
   getMembershipPlans,
   getMembershipStatus,
   renewDemoMembership,
+  upgradeDemoMembership,
 } from '../controllers/membership.controller.js';
 
 const router = Router();
@@ -35,5 +36,18 @@ router.post(
 
 // POST /api/membership/renew-demo
 router.post('/renew-demo', protect, renewDemoMembership);
+
+// POST /api/membership/upgrade-demo — move to a higher tier (same account type)
+router.post(
+  '/upgrade-demo',
+  protect,
+  [
+    body('planTier')
+      .isIn(['BASIC', 'MEDIUM', 'PREMIUM'])
+      .withMessage('planTier must be BASIC, MEDIUM, or PREMIUM'),
+  ],
+  validate,
+  upgradeDemoMembership,
+);
 
 export default router;

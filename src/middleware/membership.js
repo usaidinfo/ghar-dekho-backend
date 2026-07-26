@@ -7,14 +7,9 @@ export function isMembershipActive(user) {
   return new Date(user.membershipExpiresAt).getTime() > Date.now();
 }
 
-/**
- * Blocks actions that require paid membership.
- * Use for: property posting, viewing contact info, boosting.
- */
 export const requireActiveMembership = (req, res, next) => {
-  // Make gating configurable so development/testing isn't blocked.
-  // Enable in production by setting ENFORCE_MEMBERSHIP=true.
-  const enforce = String(process.env.ENFORCE_MEMBERSHIP || '').toLowerCase() === 'true';
+  const raw = String(process.env.ENFORCE_MEMBERSHIP ?? 'true').toLowerCase();
+  const enforce = raw !== 'false' && raw !== '0' && raw !== 'off';
   if (!enforce) return next();
 
   if (!req.user) {
@@ -22,7 +17,11 @@ export const requireActiveMembership = (req, res, next) => {
   }
   if (!isMembershipActive(req.user)) {
     return res.status(402).json(
-      error('Membership required. Please upgrade to continue.', { membershipStatus: req.user.membershipStatus }, 'MEMBERSHIP_REQUIRED'),
+      error(
+        'Membership required. Please upgrade to continue.',
+        { membershipStatus: req.user.membershipStatus },
+        'MEMBERSHIP_REQUIRED',
+      ),
     );
   }
   next();
@@ -35,4 +34,3 @@ export function maskPhone(phone) {
   const last2 = digits.slice(-2);
   return `••••••••${last2}`;
 }
-
