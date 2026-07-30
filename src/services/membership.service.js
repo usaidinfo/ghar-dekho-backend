@@ -134,6 +134,7 @@ export async function activateMembership({
   accountType,
   planTier,
   source = 'DEMO',
+  paymentId = null,
 }) {
   const plan = await findPlanByAccountAndTier(accountType, planTier);
   if (!plan) {
@@ -170,6 +171,8 @@ export async function activateMembership({
         endDate,
         autoRenew: false,
         paymentMethod: source,
+        paymentId: paymentId || undefined,
+        transactionId: paymentId || undefined,
         amount: plan.price,
         currency: plan.currency || 'INR',
       },
@@ -228,7 +231,12 @@ const TIER_RANK = { BASIC: 1, MEDIUM: 2, PREMIUM: 3 };
  * Upgrade an active membership to a higher tier (same account type).
  * Restarts the billing period on the new plan (demo / pre-Razorpay).
  */
-export async function upgradeMembership({ userId, planTier, source = 'DEMO_UPGRADE' }) {
+export async function upgradeMembership({
+  userId,
+  planTier,
+  source = 'DEMO_UPGRADE',
+  paymentId = null,
+}) {
   const ctx = await loadUserMembershipContext(userId);
   if (!ctx?.active) {
     const err = new Error('Active membership required before upgrading.');
@@ -271,6 +279,7 @@ export async function upgradeMembership({ userId, planTier, source = 'DEMO_UPGRA
     accountType: current.accountType,
     planTier: nextTier,
     source,
+    paymentId,
   });
 }
 
