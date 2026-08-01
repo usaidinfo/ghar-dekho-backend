@@ -3,7 +3,7 @@ import { body, query } from 'express-validator';
 import { validate } from '../middleware/validate.js';
 import { protect, optionalAuth } from '../middleware/auth.js';
 import { requireActiveMembership } from '../middleware/membership.js';
-import { uploadPropertyImageFiles, handleUploadError } from '../middleware/upload.js';
+import { uploadPropertyImageFiles, uploadPropertyVideoFile, handleUploadError } from '../middleware/upload.js';
 import {
   getProperties,
   getFeaturedProperties,
@@ -13,6 +13,7 @@ import {
   updateProperty,
   deleteProperty,
   uploadPropertyImages,
+  uploadPropertyVideo,
   deletePropertyImage,
   getMyListings,
   getMyAnalytics,
@@ -138,6 +139,20 @@ router.post(
     });
   },
   uploadPropertyImages
+);
+
+// POST /api/properties/:id/video
+router.post(
+  '/:id/video',
+  protect,
+  requireActiveMembership,
+  (req, res, next) => {
+    uploadPropertyVideoFile(req, res, (err) => {
+      if (err) return handleUploadError(err, req, res, next);
+      next();
+    });
+  },
+  uploadPropertyVideo,
 );
 
 // DELETE /api/properties/:id/images/:imageId

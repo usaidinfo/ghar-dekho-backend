@@ -102,6 +102,17 @@ export const scheduleMeeting = async (req, res) => {
       },
     }).catch(console.error);
 
+    // Surface visit as an agent lead
+    const { upsertPropertyLead } = await import('../services/leadCapture.service.js');
+    upsertPropertyLead({
+      propertyId,
+      buyerId: req.user.id,
+      source: 'DIRECT',
+      status: 'VISIT_SCHEDULED',
+      followUpAt: scheduledDate,
+      notes: notes || `Visit scheduled for ${scheduledDate.toLocaleString()}`,
+    }).catch(console.error);
+
     return res.status(201).json(success(meeting, 'Meeting scheduled successfully!'));
   } catch (err) {
     console.error('scheduleMeeting error:', err);

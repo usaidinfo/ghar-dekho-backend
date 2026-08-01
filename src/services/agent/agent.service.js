@@ -79,6 +79,8 @@ function mapLead(lead) {
     id: lead.id,
     leadName: leadName(lead.buyer),
     maskedPhone: maskPhone(lead.buyer?.phone),
+    /** Full phone for agent contact actions (call / WhatsApp). */
+    contactPhone: lead.buyer?.phone || null,
     stage,
     propertyTitle: lead.property?.title || 'Property',
     propertyLocation: propertyLocation(lead.property),

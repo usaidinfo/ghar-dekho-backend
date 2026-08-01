@@ -25,12 +25,24 @@ export const uploadImage = multer({
   fileFilter: imageMimeFilter,
 });
 
-// Video upload (MP4, MOV, WebM)
+// Video upload (MP4, MOV, WebM, and common Android MIME types)
+const videoMimeFilter = (req, file, cb) => {
+  const m = (file.mimetype || '').toLowerCase();
+  if (m.startsWith('video/')) return cb(null, true);
+  cb(new Error('Invalid file type. Please choose a video.'), false);
+};
+
 export const uploadVideo = multer({
   storage,
   limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
-  fileFilter: fileFilter(['video/mp4', 'video/quicktime', 'video/webm']),
+  fileFilter: videoMimeFilter,
 });
+
+export const uploadPropertyVideoFile = multer({
+  storage,
+  limits: { fileSize: 100 * 1024 * 1024 },
+  fileFilter: videoMimeFilter,
+}).single('video');
 
 // Document upload (PDF)
 export const uploadDocument = multer({

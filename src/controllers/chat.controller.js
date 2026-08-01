@@ -87,6 +87,16 @@ export const createOrGetSession = async (req, res) => {
     });
 
     if (existing) {
+      if (propertyId) {
+        const { upsertPropertyLead } = await import('../services/leadCapture.service.js');
+        upsertPropertyLead({
+          propertyId,
+          buyerId: userId,
+          source: 'DIRECT',
+          status: 'CONTACTED',
+          notes: 'Buyer continued chat about this listing',
+        }).catch(() => {});
+      }
       return res.json(success(existing, 'Chat session found.'));
     }
 
@@ -102,6 +112,17 @@ export const createOrGetSession = async (req, res) => {
         user2: { select: { id: true, profile: { select: { firstName: true, lastName: true, profileImage: true } } } },
       },
     });
+
+    if (propertyId) {
+      const { upsertPropertyLead } = await import('../services/leadCapture.service.js');
+      upsertPropertyLead({
+        propertyId,
+        buyerId: userId,
+        source: 'DIRECT',
+        status: 'CONTACTED',
+        notes: 'Buyer started a chat about this listing',
+      }).catch(() => {});
+    }
 
     return res.status(201).json(success(session, 'Chat session created.'));
   } catch (err) {

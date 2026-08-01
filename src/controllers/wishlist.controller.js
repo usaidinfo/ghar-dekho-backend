@@ -71,6 +71,15 @@ export const addToWishlist = async (req, res) => {
       include: { property: { select: { id: true, title: true, price: true } } },
     });
 
+    const { upsertPropertyLead } = await import('../services/leadCapture.service.js');
+    upsertPropertyLead({
+      propertyId,
+      buyerId: req.user.id,
+      source: 'DIRECT',
+      status: 'INTERESTED',
+      notes: notes || 'Saved to wishlist',
+    }).catch(() => {});
+
     return res.status(201).json(success(item, 'Property saved to wishlist.'));
   } catch (err) {
     console.error('addToWishlist error:', err);

@@ -310,6 +310,21 @@ export const getPropertyById = async (req, res) => {
           source:     req.query.source || 'direct',
         },
       }).catch(() => {}); // don't fail on duplicate
+
+      // Auto-create agent lead when a signed-in buyer views a listing
+      const { upsertPropertyLead } = await import('../services/leadCapture.service.js');
+      const viewSource = String(req.query.source || 'direct').toUpperCase();
+      const leadSource = ['SEARCH', 'FEATURED', 'MAP', 'REFERRAL', 'DIRECT', 'SOCIAL_MEDIA'].includes(
+        viewSource,
+      )
+        ? viewSource
+        : 'DIRECT';
+      upsertPropertyLead({
+        propertyId: req.params.id,
+        buyerId: req.user.id,
+        source: leadSource,
+        status: 'NEW',
+      }).catch(() => {});
     }
 
     const viewerHasMembership = isMembershipActive(req.user);
@@ -493,9 +508,12 @@ export const createProperty = async (req, res) => {
     });
 
     // If images are provided in the same multipart request, upload + attach now.
-    if (Array.isArray(req.files) && req.files.length) {
+    const imageFiles = Array.isArray(req.files)
+      ? req.files.filter(f => String(f.mimetype || '').startsWith('image/'))
+      : [];
+    if (imageFiles.length) {
       try {
-        const uploadResults = await uploadMultipleImages(req.files, 'property-images');
+        const uploadResults = await uploadMultipleImages(imageFiles, 'property-images');
         await prisma.$transaction(
           uploadResults.map((result, idx) =>
             prisma.propertyImage.create({
@@ -657,6 +675,57 @@ export const uploadPropertyImages = async (req, res) => {
   } catch (err) {
     console.error('uploadPropertyImages error:', err);
     return res.status(500).json(error('Failed to upload images.'));
+  }
+};
+
+// ─── Upload Property Video Tour ───────────────────────────────
+export const uploadPropertyVideo = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json(error('No video provided. Use form field name "video".'));
+    }
+
+    const property = await prisma.property.findUnique({ where: { id: req.params.id } });
+    if (!property) return res.status(404).json(error('Property not found.'));
+    if (property.ownerId !== req.user.id && req.user.role !== 'ADMIN') {
+      return res.status(403).json(error('Not authorized.'));
+    }
+
+    const result = await uploadToCloudinary(req.file.buffer, 'property-videos', 'video');
+    const thumbnailUrl = result.secure_url
+      ? result.secure_url.replace('/video/upload/', '/video/upload/so_1,f_jpg/')
+      : null;
+
+    // Replace previous tour videos so each listing keeps one primary tour.
+    const existing = await prisma.propertyVideo.findMany({
+      where: { propertyId: req.params.id },
+      select: { id: true, publicId: true },
+    });
+    for (const row of existing) {
+      if (row.publicId) {
+        await deleteFromCloudinary(row.publicId, 'video').catch(() => {});
+      }
+    }
+    if (existing.length) {
+      await prisma.propertyVideo.deleteMany({ where: { propertyId: req.params.id } });
+    }
+
+    const video = await prisma.propertyVideo.create({
+      data: {
+        propertyId: req.params.id,
+        videoUrl: result.secure_url,
+        thumbnailUrl,
+        publicId: result.public_id,
+        duration: result.duration != null ? Math.round(Number(result.duration)) : null,
+        isPrimary: true,
+        sizeBytes: result.bytes != null ? Number(result.bytes) : req.file.size || null,
+      },
+    });
+
+    return res.status(201).json(success(video, 'Video tour uploaded successfully.'));
+  } catch (err) {
+    console.error('uploadPropertyVideo error:', err);
+    return res.status(500).json(error('Failed to upload video.'));
   }
 };
 
