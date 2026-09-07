@@ -1028,7 +1028,7 @@ model Subscription {
 }
 
 // ============================================================
-// PAYMENTS (Razorpay / Stripe, etc.)
+// PAYMENTS (PayU / Razorpay / Stripe, etc.)
 // ============================================================
 
 model PaymentTransaction {
@@ -1060,6 +1060,7 @@ model PaymentTransaction {
 }
 
 enum PaymentProvider {
+  PAYU
   RAZORPAY
   STRIPE
 }

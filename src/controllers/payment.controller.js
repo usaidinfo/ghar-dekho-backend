@@ -2,7 +2,7 @@ import { success, error } from '../utils/response.js';
 import { formatMembershipPayload } from '../services/membership.service.js';
 import {
   createMembershipOrder,
-  isRazorpayConfigured,
+  isPayUConfigured,
   verifyMembershipPayment,
 } from '../services/payment.service.js';
 
@@ -13,18 +13,44 @@ function sendServiceError(res, err, fallback) {
     .json(error(err.message || fallback, err.meta ?? null, err.code || 'SERVER_ERROR'));
 }
 
-/** GET /api/payments/config — public key only (safe for clients) */
+function pickPayUVerifyBody(body = {}) {
+  const nested = body.payu || body.payuResponse || body.response || {};
+  return {
+    paymentId: body.paymentId || nested.paymentId || nested.udf1,
+    txnid: body.txnid || nested.txnid,
+    mihpayid: body.mihpayid || nested.mihpayid,
+    status: body.status || nested.status,
+    hash: body.hash || nested.hash,
+    amount: body.amount || nested.amount,
+    productinfo: body.productinfo || nested.productinfo,
+    firstname: body.firstname || nested.firstname,
+    email: body.email || nested.email,
+    udf1: body.udf1 || nested.udf1,
+    udf2: body.udf2 || nested.udf2,
+    udf3: body.udf3 || nested.udf3,
+    udf4: body.udf4 || nested.udf4,
+    udf5: body.udf5 || nested.udf5,
+  };
+}
+
+/** GET /api/payments/config — public merchant key only (safe for clients) */
 export const getPaymentConfig = async (_req, res) => {
   try {
-    const configured = isRazorpayConfigured();
+    const configured = isPayUConfigured();
+    const mode =
+      String(process.env.PAYU_MODE || 'test').trim().toLowerCase() === 'live' ? 'live' : 'test';
     return res.json(
       success({
         configured,
-        keyId: configured ? process.env.RAZORPAY_KEY_ID.trim() : null,
-        provider: 'RAZORPAY',
-        mode: String(process.env.RAZORPAY_KEY_ID || '').startsWith('rzp_live_')
-          ? 'live'
-          : 'test',
+        keyId: configured ? process.env.PAYU_MERCHANT_KEY.trim() : null,
+        key: configured ? process.env.PAYU_MERCHANT_KEY.trim() : null,
+        provider: 'PAYU',
+        mode,
+        paymentUrl: configured
+          ? mode === 'live'
+            ? 'https://secure.payu.in/_payment'
+            : 'https://test.payu.in/_payment'
+          : null,
       }),
     );
   } catch (err) {
@@ -49,15 +75,74 @@ export const createMembershipPaymentOrder = async (req, res) => {
   }
 };
 
+/** POST/GET /api/payments/payu/success|failure — PayU browser return bridge for mobile WebView */
+export const payuReturnBridge = async (req, res) => {
+  try {
+    const params = { ...(req.query || {}), ...(req.body || {}) };
+    const payload = {
+      txnid: params.txnid || '',
+      mihpayid: params.mihpayid || '',
+      status: params.status || '',
+      hash: params.hash || '',
+      amount: params.amount || '',
+      productinfo: params.productinfo || '',
+      firstname: params.firstname || '',
+      email: params.email || '',
+      udf1: params.udf1 || '',
+      udf2: params.udf2 || '',
+      udf3: params.udf3 || '',
+      udf4: params.udf4 || '',
+      udf5: params.udf5 || '',
+      error_Message: params.error_Message || params.error || '',
+    };
+
+    const qs = new URLSearchParams(
+      Object.entries(payload).reduce((acc, [key, value]) => {
+        if (value !== undefined && value !== null && String(value).length) acc[key] = String(value);
+        return acc;
+      }, {}),
+    ).toString();
+
+    const deepLink = `ghardekho://payu/callback?${qs}`;
+    const json = JSON.stringify(payload).replace(/</g, '\\u003c');
+
+    res.removeHeader('Content-Security-Policy');
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.status(200).send(`<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Payment complete</title>
+  </head>
+  <body style="font-family: sans-serif; text-align: center; padding: 40px;">
+    <p>Payment complete. Returning to Ghar Dekho…</p>
+    <script>
+      (function () {
+        var payload = ${json};
+        if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+          window.ReactNativeWebView.postMessage(JSON.stringify(payload));
+        }
+        setTimeout(function () {
+          window.location.href = ${JSON.stringify(deepLink)};
+        }, 50);
+      })();
+    </script>
+  </body>
+</html>`);
+  } catch (err) {
+    console.error('payuReturnBridge error:', err);
+    return res.status(500).send('Payment return handling failed.');
+  }
+};
+
 /** POST /api/payments/membership/verify */
 export const verifyMembershipPaymentOrder = async (req, res) => {
   try {
+    const fields = pickPayUVerifyBody(req.body);
     const result = await verifyMembershipPayment({
       userId: req.user.id,
-      paymentId: req.body.paymentId,
-      razorpayOrderId: req.body.razorpay_order_id || req.body.razorpayOrderId,
-      razorpayPaymentId: req.body.razorpay_payment_id || req.body.razorpayPaymentId,
-      razorpaySignature: req.body.razorpay_signature || req.body.razorpaySignature,
+      ...fields,
     });
 
     return res.json(

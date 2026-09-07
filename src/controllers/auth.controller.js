@@ -5,7 +5,7 @@ import { signAccessToken, signRefreshToken, verifyToken } from '../utils/jwt.js'
 import { success, error } from '../utils/response.js';
 import { createOTP, verifyOTP } from '../services/otp.service.js';
 import { sendOTPEmail, sendWelcomeEmail } from '../services/email.service.js';
-import { sendOTPSMS, isMsg91Configured } from '../services/sms.service.js';
+import { sendOTPSMS, isTwilioConfigured } from '../services/sms.service.js';
 
 // ─── Send OTP ────────────────────────────────────────────────
 export const sendOTP = async (req, res) => {
@@ -32,14 +32,12 @@ export const sendOTP = async (req, res) => {
             : phoneRaw
       : null;
 
-    // Phone OTP path: require either MSG91 to be configured, or an explicit
-    // dev/staging opt-in. This prevents accidentally "succeeding" silently
-    // in production when no SMS provider exists.
+    // Phone OTP path: require Twilio, or an explicit dev/staging opt-in.
     const isPhoneOnly = !!phoneNormalized && !emailNorm;
-    const msg91Ready = isMsg91Configured();
+    const twilioReady = isTwilioConfigured();
     if (isPhoneOnly) {
       const allowPhoneOtp =
-        msg91Ready ||
+        twilioReady ||
         process.env.NODE_ENV === 'development' ||
         String(process.env.ALLOW_PHONE_OTP || '').toLowerCase() === 'true';
       if (!allowPhoneOtp) {
@@ -60,10 +58,10 @@ export const sendOTP = async (req, res) => {
       await sendOTPEmail(emailNorm, otp, type);
     }
 
-    // SMS channel (MSG91)
+    // SMS channel (Twilio)
     let smsError = null;
-    if (phoneNormalized && msg91Ready) {
-      const smsRes = await sendOTPSMS(phoneNormalized, otp);
+    if (phoneNormalized && twilioReady) {
+      const smsRes = await sendOTPSMS(phoneNormalized, otp, type);
       if (!smsRes.ok) {
         smsError = smsRes.reason;
         // Hard-fail in production — we don't want to lie to the user about
@@ -468,17 +466,43 @@ export const forgotPassword = async (req, res) => {
       return res.status(400).json(error('Email or phone required.'));
     }
 
-    if (phone && !email) {
+    const emailNorm = email ? String(email).trim().toLowerCase() : null;
+    const phoneRaw = phone ? String(phone).trim() : null;
+    const phoneDigits = phoneRaw ? phoneRaw.replace(/\D/g, '') : '';
+    const phoneNormalized = phoneRaw
+      ? phoneRaw.startsWith('+')
+        ? phoneRaw
+        : phoneDigits.length === 10
+          ? `+91${phoneDigits}`
+          : phoneDigits.length >= 11
+            ? `+${phoneDigits}`
+            : phoneRaw
+      : null;
+
+    const isPhoneOnly = !!phoneNormalized && !emailNorm;
+    const twilioReady = isTwilioConfigured();
+    if (isPhoneOnly && !twilioReady && process.env.NODE_ENV === 'production') {
       return res
         .status(501)
-        .json(error('Phone OTP is not enabled yet. Please use email for password reset.', null, 'PHONE_OTP_PENDING'));
+        .json(
+          error(
+            'Phone OTP is not enabled on this server yet. Please use email for password reset.',
+            null,
+            'PHONE_OTP_PENDING',
+          ),
+        );
     }
 
     const user = await prisma.user.findFirst({
       where: {
         OR: [
-          ...(email ? [{ email }] : []),
-          ...(phone ? [{ phone }] : []),
+          ...(emailNorm ? [{ email: emailNorm }] : []),
+          ...(phoneNormalized
+            ? [
+                { phone: phoneNormalized },
+                ...(phoneDigits ? [{ phone: phoneDigits }, { phone: `+${phoneDigits}` }] : []),
+              ]
+            : []),
         ],
       },
     });
@@ -488,13 +512,34 @@ export const forgotPassword = async (req, res) => {
       return res.json(success(null, 'If an account exists, an OTP will be sent.'));
     }
 
-    const otp = await createOTP({ userId: user.id, email, phone, type: 'PASSWORD_RESET' });
+    const otp = await createOTP({
+      userId: user.id,
+      email: emailNorm,
+      phone: phoneNormalized,
+      type: 'PASSWORD_RESET',
+    });
 
-    if (email) {
-      await sendOTPEmail(email, otp, 'PASSWORD_RESET');
+    if (emailNorm) {
+      await sendOTPEmail(emailNorm, otp, 'PASSWORD_RESET');
     }
 
-    const devData = process.env.NODE_ENV === 'development' ? { otp } : {};
+    let smsError = null;
+    if (phoneNormalized && twilioReady) {
+      const smsRes = await sendOTPSMS(phoneNormalized, otp, 'PASSWORD_RESET');
+      if (!smsRes.ok) {
+        smsError = smsRes.reason;
+        if (process.env.NODE_ENV === 'production' && isPhoneOnly) {
+          return res
+            .status(502)
+            .json(error(`Failed to deliver OTP via SMS: ${smsError}`, null, 'SMS_DELIVERY_FAILED'));
+        }
+      }
+    }
+
+    const exposeOtp =
+      process.env.NODE_ENV === 'development' ||
+      String(process.env.RETURN_OTP_IN_RESPONSE || '').toLowerCase() === 'true';
+    const devData = exposeOtp ? { otp, ...(smsError ? { smsError } : {}) } : {};
     return res.json(success(devData, 'OTP sent for password reset.'));
   } catch (err) {
     console.error('forgotPassword error:', err);

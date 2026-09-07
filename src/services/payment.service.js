@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import Razorpay from 'razorpay';
+import axios from 'axios';
 import prisma from '../config/database.js';
 import {
   activateMembership,
@@ -12,37 +12,163 @@ const VALID_ACCOUNT_TYPES = new Set(['OWNER', 'BROKER', 'BUILDER']);
 const VALID_PLAN_TIERS = new Set(['BASIC', 'MEDIUM', 'PREMIUM']);
 const VALID_MODES = new Set(['activate', 'renew', 'upgrade']);
 const TIER_RANK = { BASIC: 1, MEDIUM: 2, PREMIUM: 3 };
+const SUCCESS_STATUSES = new Set(['success', 'captured']);
 
-export function isRazorpayConfigured() {
+export function isPayUConfigured() {
   return Boolean(
-    String(process.env.RAZORPAY_KEY_ID || '').trim() &&
-      String(process.env.RAZORPAY_KEY_SECRET || '').trim(),
+    String(process.env.PAYU_MERCHANT_KEY || '').trim() &&
+      String(process.env.PAYU_MERCHANT_SALT || '').trim(),
   );
 }
 
-function getRazorpayClient() {
-  if (!isRazorpayConfigured()) {
-    const err = new Error('Razorpay is not configured on the server.');
+function getPublicApiBase() {
+  const configured = String(process.env.PUBLIC_API_URL || process.env.API_PUBLIC_URL || '').trim();
+  if (configured) return configured.replace(/\/+$/, '');
+  const port = process.env.PORT || 5000;
+  return `http://localhost:${port}`;
+}
+
+function getPayUConfig() {
+  if (!isPayUConfigured()) {
+    const err = new Error('PayU is not configured on the server.');
     err.status = 503;
-    err.code = 'RAZORPAY_NOT_CONFIGURED';
+    err.code = 'PAYU_NOT_CONFIGURED';
     throw err;
   }
 
-  return new Razorpay({
-    key_id: process.env.RAZORPAY_KEY_ID.trim(),
-    key_secret: process.env.RAZORPAY_KEY_SECRET.trim(),
-  });
+  const key = process.env.PAYU_MERCHANT_KEY.trim();
+  const salt = process.env.PAYU_MERCHANT_SALT.trim();
+  const mode =
+    String(process.env.PAYU_MODE || 'test').trim().toLowerCase() === 'live' ? 'live' : 'test';
+  const publicBase = getPublicApiBase();
+
+  return {
+    key,
+    salt,
+    mode,
+    paymentUrl:
+      mode === 'live' ? 'https://secure.payu.in/_payment' : 'https://test.payu.in/_payment',
+    infoUrl:
+      mode === 'live'
+        ? 'https://info.payu.in/merchant/postservice?form=2'
+        : 'https://test.payu.in/merchant/postservice?form=2',
+    successUrl:
+      String(process.env.PAYU_SUCCESS_URL || '').trim() ||
+      `${publicBase}/api/payments/payu/success`,
+    failureUrl:
+      String(process.env.PAYU_FAILURE_URL || '').trim() ||
+      `${publicBase}/api/payments/payu/failure`,
+  };
 }
 
-function toPaise(amountInr) {
-  const paise = Math.round(Number(amountInr) * 100);
-  if (!Number.isFinite(paise) || paise < 100) {
+function sha512(value) {
+  return crypto.createHash('sha512').update(String(value)).digest('hex');
+}
+
+function formatAmount(amountInr) {
+  const amount = Number(amountInr);
+  if (!Number.isFinite(amount) || amount < 1) {
     const err = new Error('Plan price must be at least ₹1.');
     err.status = 400;
     err.code = 'INVALID_AMOUNT';
     throw err;
   }
-  return paise;
+  return amount.toFixed(2);
+}
+
+function timingSafeEqualHex(a, b) {
+  const left = Buffer.from(String(a || '').toLowerCase());
+  const right = Buffer.from(String(b || '').toLowerCase());
+  if (left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+}
+
+/**
+ * PayU payment request hash:
+ * sha512(key|txnid|amount|productinfo|firstname|email|udf1|udf2|udf3|udf4|udf5||||||SALT)
+ */
+function buildPaymentHash({
+  key,
+  salt,
+  txnid,
+  amount,
+  productinfo,
+  firstname,
+  email,
+  udf1 = '',
+  udf2 = '',
+  udf3 = '',
+  udf4 = '',
+  udf5 = '',
+}) {
+  const payload = [
+    key,
+    txnid,
+    amount,
+    productinfo,
+    firstname,
+    email,
+    udf1,
+    udf2,
+    udf3,
+    udf4,
+    udf5,
+    '',
+    '',
+    '',
+    '',
+    '',
+    salt,
+  ].join('|');
+  return sha512(payload);
+}
+
+/**
+ * PayU reverse hash (response verification):
+ * sha512(SALT|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key)
+ */
+function buildReverseHash({
+  key,
+  salt,
+  status,
+  email,
+  firstname,
+  productinfo,
+  amount,
+  txnid,
+  udf1 = '',
+  udf2 = '',
+  udf3 = '',
+  udf4 = '',
+  udf5 = '',
+}) {
+  const payload = [
+    salt,
+    status,
+    '',
+    '',
+    '',
+    '',
+    '',
+    udf5,
+    udf4,
+    udf3,
+    udf2,
+    udf1,
+    email,
+    firstname,
+    productinfo,
+    amount,
+    txnid,
+    key,
+  ].join('|');
+  return sha512(payload);
+}
+
+function buildTxnId(paymentId) {
+  // PayU txnid max length is 25
+  const compact = String(paymentId || '').replace(/-/g, '');
+  return `gd${compact}`.slice(0, 25);
 }
 
 async function resolveCheckoutPlan({ userId, mode, accountType, planTier }) {
@@ -129,8 +255,40 @@ async function resolveCheckoutPlan({ userId, mode, accountType, planTier }) {
   };
 }
 
+async function loadCheckoutUser(userId) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      email: true,
+      phone: true,
+      profile: { select: { firstName: true, lastName: true } },
+    },
+  });
+
+  if (!user) {
+    const err = new Error('User not found.');
+    err.status = 404;
+    err.code = 'USER_NOT_FOUND';
+    throw err;
+  }
+
+  const firstname =
+    String(user.profile?.firstName || '').trim() ||
+    String(user.email || '').split('@')[0] ||
+    'Customer';
+  const email =
+    String(user.email || '').trim() ||
+    `${String(user.id).replace(/-/g, '').slice(0, 12)}@ghardekho.local`;
+  const phoneDigits = String(user.phone || '').replace(/\D/g, '');
+  const phone =
+    phoneDigits.length >= 10 ? phoneDigits.slice(-10) : phoneDigits || '9999999999';
+
+  return { user, firstname, email, phone };
+}
+
 /**
- * Create a Razorpay order + PaymentTransaction for membership checkout.
+ * Create a PayU checkout payload + PaymentTransaction for membership.
  */
 export async function createMembershipOrder({
   userId,
@@ -156,13 +314,15 @@ export async function createMembershipOrder({
     planTier,
   });
 
-  const amountPaise = toPaise(resolved.plan.price);
-  const razorpay = getRazorpayClient();
+  const payu = getPayUConfig();
+  const { firstname, email, phone } = await loadCheckoutUser(userId);
+  const amount = formatAmount(resolved.plan.price);
+  const productinfo = `Ghar Dekho ${resolved.plan.name}`.slice(0, 100);
 
   const payment = await prisma.paymentTransaction.create({
     data: {
       userId,
-      provider: 'RAZORPAY',
+      provider: 'PAYU',
       purpose: 'MEMBERSHIP',
       status: 'CREATED',
       amount: resolved.plan.price,
@@ -178,34 +338,64 @@ export async function createMembershipOrder({
   });
 
   try {
-    const order = await razorpay.orders.create({
-      amount: amountPaise,
-      currency: resolved.plan.currency || 'INR',
-      receipt: payment.id.replace(/-/g, '').slice(0, 40),
-      notes: {
-        paymentId: payment.id,
-        userId,
-        mode: resolved.mode,
-        accountType: resolved.accountType,
-        planTier: resolved.planTier,
-        planId: resolved.plan.id,
-      },
+    const txnid = buildTxnId(payment.id);
+    const udf1 = payment.id;
+    const udf2 = resolved.mode;
+    const udf3 = resolved.accountType;
+    const udf4 = resolved.planTier;
+    const udf5 = resolved.plan.id;
+
+    const hash = buildPaymentHash({
+      key: payu.key,
+      salt: payu.salt,
+      txnid,
+      amount,
+      productinfo,
+      firstname,
+      email,
+      udf1,
+      udf2,
+      udf3,
+      udf4,
+      udf5,
     });
+
+    const payuParams = {
+      key: payu.key,
+      txnid,
+      amount,
+      productinfo,
+      firstname,
+      email,
+      phone,
+      surl: payu.successUrl,
+      furl: payu.failureUrl,
+      hash,
+      udf1,
+      udf2,
+      udf3,
+      udf4,
+      udf5,
+      service_provider: 'payu_paisa',
+    };
 
     await prisma.paymentTransaction.update({
       where: { id: payment.id },
       data: {
-        providerOrderId: order.id,
+        providerOrderId: txnid,
         metadata: {
           mode: resolved.mode,
           accountType: resolved.accountType,
           planTier: resolved.planTier,
           planId: resolved.plan.id,
           planName: resolved.plan.name,
-          razorpayOrder: {
-            id: order.id,
-            amount: order.amount,
-            currency: order.currency,
+          payu: {
+            txnid,
+            amount,
+            productinfo,
+            firstname,
+            email,
+            phone,
           },
         },
       },
@@ -213,16 +403,35 @@ export async function createMembershipOrder({
 
     return {
       paymentId: payment.id,
-      orderId: order.id,
-      amount: amountPaise,
-      currency: order.currency || 'INR',
-      keyId: process.env.RAZORPAY_KEY_ID.trim(),
+      txnid,
+      orderId: txnid,
+      amount,
+      amountPaise: Math.round(Number(amount) * 100),
+      currency: resolved.plan.currency || 'INR',
+      key: payu.key,
+      keyId: payu.key,
+      hash,
+      productinfo,
+      firstname,
+      email,
+      phone,
+      surl: payu.successUrl,
+      furl: payu.failureUrl,
+      udf1,
+      udf2,
+      udf3,
+      udf4,
+      udf5,
+      paymentUrl: payu.paymentUrl,
+      provider: 'PAYU',
+      mode: resolved.mode,
+      environment: payu.mode,
       planName: resolved.plan.name,
       planDays: resolved.plan.duration,
       priceInr: resolved.plan.price,
-      mode: resolved.mode,
       accountType: resolved.accountType,
       planTier: resolved.planTier,
+      payuParams,
     };
   } catch (err) {
     await prisma.paymentTransaction.update({
@@ -243,13 +452,25 @@ export async function createMembershipOrder({
   }
 }
 
-function verifyRazorpaySignature({ orderId, paymentId, signature }) {
-  const secret = process.env.RAZORPAY_KEY_SECRET.trim();
-  const payload = `${orderId}|${paymentId}`;
-  const expected = crypto.createHmac('sha256', secret).update(payload).digest('hex');
-  const a = Buffer.from(expected);
-  const b = Buffer.from(String(signature || ''));
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+function verifyPayUResponseHash(payload) {
+  const payu = getPayUConfig();
+  const expected = buildReverseHash({
+    key: payu.key,
+    salt: payu.salt,
+    status: payload.status,
+    email: payload.email || '',
+    firstname: payload.firstname || '',
+    productinfo: payload.productinfo || '',
+    amount: payload.amount,
+    txnid: payload.txnid,
+    udf1: payload.udf1 || '',
+    udf2: payload.udf2 || '',
+    udf3: payload.udf3 || '',
+    udf4: payload.udf4 || '',
+    udf5: payload.udf5 || '',
+  });
+
+  if (!timingSafeEqualHex(expected, payload.hash)) {
     const err = new Error('Invalid payment signature.');
     err.status = 400;
     err.code = 'INVALID_SIGNATURE';
@@ -257,24 +478,78 @@ function verifyRazorpaySignature({ orderId, paymentId, signature }) {
   }
 }
 
+async function verifyPayUTransactionStatus(txnid) {
+  const payu = getPayUConfig();
+  const command = 'verify_payment';
+  const hash = sha512(`${payu.key}|${command}|${txnid}|${payu.salt}`);
+
+  try {
+    const { data } = await axios.post(
+      payu.infoUrl,
+      new URLSearchParams({
+        key: payu.key,
+        command,
+        var1: txnid,
+        hash,
+      }).toString(),
+      {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        timeout: 15000,
+      },
+    );
+
+    const transaction =
+      data?.transaction_details?.[txnid] ||
+      data?.transaction_details?.[String(txnid).toUpperCase()] ||
+      null;
+
+    if (!transaction) {
+      return { ok: false, raw: data };
+    }
+
+    const status = String(transaction.status || '').toLowerCase();
+    return {
+      ok: SUCCESS_STATUSES.has(status),
+      status,
+      mihpayid: transaction.mihpayid || transaction.imei || null,
+      amount: transaction.amt || transaction.amount || null,
+      raw: transaction,
+    };
+  } catch (err) {
+    // Hash verification already passed; soft-fail remote verify so checkout is not blocked by PayU outage.
+    console.warn('PayU verify_payment API failed:', err?.message || err);
+    return { ok: null, error: err?.message || 'verify_payment failed' };
+  }
+}
+
 /**
- * Verify Razorpay payment and activate / renew / upgrade membership.
+ * Verify PayU payment and activate / renew / upgrade membership.
  */
 export async function verifyMembershipPayment({
   userId,
   paymentId,
-  razorpayOrderId,
-  razorpayPaymentId,
-  razorpaySignature,
+  txnid,
+  mihpayid,
+  status,
+  hash,
+  amount,
+  productinfo,
+  firstname,
+  email,
+  udf1,
+  udf2,
+  udf3,
+  udf4,
+  udf5,
 }) {
-  if (!isRazorpayConfigured()) {
-    const err = new Error('Razorpay is not configured on the server.');
+  if (!isPayUConfigured()) {
+    const err = new Error('PayU is not configured on the server.');
     err.status = 503;
-    err.code = 'RAZORPAY_NOT_CONFIGURED';
+    err.code = 'PAYU_NOT_CONFIGURED';
     throw err;
   }
 
-  if (!paymentId || !razorpayOrderId || !razorpayPaymentId || !razorpaySignature) {
+  if (!paymentId || !txnid || !status || !hash || !amount) {
     const err = new Error('Missing payment verification fields.');
     err.status = 400;
     err.code = 'MISSING_FIELDS';
@@ -292,7 +567,7 @@ export async function verifyMembershipPayment({
     throw err;
   }
 
-  if (payment.status === 'CAPTURED' && payment.providerPaymentId === razorpayPaymentId) {
+  if (payment.status === 'CAPTURED' && (!mihpayid || payment.providerPaymentId === mihpayid)) {
     const ctx = await loadUserMembershipContext(userId);
     return {
       alreadyProcessed: true,
@@ -301,39 +576,91 @@ export async function verifyMembershipPayment({
     };
   }
 
-  if (payment.providerOrderId && payment.providerOrderId !== razorpayOrderId) {
-    const err = new Error('Order id does not match this payment.');
+  if (payment.providerOrderId && payment.providerOrderId !== txnid) {
+    const err = new Error('Transaction id does not match this payment.');
     err.status = 400;
     err.code = 'ORDER_MISMATCH';
     throw err;
   }
 
-  verifyRazorpaySignature({
-    orderId: razorpayOrderId,
-    paymentId: razorpayPaymentId,
-    signature: razorpaySignature,
-  });
+  const expectedAmount = formatAmount(payment.amount);
+  if (Number(amount).toFixed(2) !== expectedAmount) {
+    const err = new Error('Payment amount does not match this order.');
+    err.status = 400;
+    err.code = 'AMOUNT_MISMATCH';
+    throw err;
+  }
 
   const meta = payment.metadata && typeof payment.metadata === 'object' ? payment.metadata : {};
+  const stored = meta.payu && typeof meta.payu === 'object' ? meta.payu : {};
+
+  // Reverse hash must use the exact values PayU echoed in the response.
+  verifyPayUResponseHash({
+    status,
+    hash,
+    amount: String(amount),
+    txnid: String(txnid),
+    email: String(email ?? stored.email ?? ''),
+    firstname: String(firstname ?? stored.firstname ?? ''),
+    productinfo: String(productinfo ?? stored.productinfo ?? ''),
+    udf1: String(udf1 ?? payment.id ?? ''),
+    udf2: String(udf2 ?? meta.mode ?? ''),
+    udf3: String(udf3 ?? meta.accountType ?? ''),
+    udf4: String(udf4 ?? meta.planTier ?? ''),
+    udf5: String(udf5 ?? meta.planId ?? ''),
+  });
+
+  const normalizedStatus = String(status).toLowerCase();
+  if (!SUCCESS_STATUSES.has(normalizedStatus)) {
+    await prisma.paymentTransaction.update({
+      where: { id: payment.id },
+      data: {
+        status: 'FAILED',
+        providerOrderId: txnid,
+        providerPaymentId: mihpayid || payment.providerPaymentId,
+        providerSignature: hash,
+        metadata: {
+          ...meta,
+          payuStatus: normalizedStatus,
+          failedAt: new Date().toISOString(),
+        },
+      },
+    });
+
+    const err = new Error(`Payment ${normalizedStatus}. Membership was not activated.`);
+    err.status = 400;
+    err.code = 'PAYMENT_NOT_SUCCESS';
+    throw err;
+  }
+
+  const remote = await verifyPayUTransactionStatus(txnid);
+  if (remote.ok === false) {
+    const err = new Error('PayU could not confirm this payment.');
+    err.status = 400;
+    err.code = 'PAYMENT_NOT_CONFIRMED';
+    err.meta = { payuStatus: remote.status || null };
+    throw err;
+  }
+
   const mode = String(meta.mode || 'activate').toLowerCase();
   const accountType = String(meta.accountType || '').toUpperCase();
   const planTier = String(meta.planTier || '').toUpperCase();
+  const providerPaymentId = mihpayid || remote.mihpayid || txnid;
 
   let activation;
   if (mode === 'upgrade') {
     activation = await upgradeMembership({
       userId,
       planTier,
-      source: 'RAZORPAY',
+      source: 'PAYU',
       paymentId: payment.id,
     });
   } else {
-    // activate + renew both create a fresh period on the resolved plan
     activation = await activateMembership({
       userId,
       accountType,
       planTier,
-      source: mode === 'renew' ? 'RAZORPAY_RENEW' : 'RAZORPAY',
+      source: mode === 'renew' ? 'PAYU_RENEW' : 'PAYU',
       paymentId: payment.id,
     });
   }
@@ -342,13 +669,15 @@ export async function verifyMembershipPayment({
     where: { id: payment.id },
     data: {
       status: 'CAPTURED',
-      providerOrderId: razorpayOrderId,
-      providerPaymentId: razorpayPaymentId,
-      providerSignature: razorpaySignature,
+      providerOrderId: txnid,
+      providerPaymentId,
+      providerSignature: hash,
       metadata: {
         ...meta,
         verifiedAt: new Date().toISOString(),
         subscriptionId: activation.subscription.id,
+        payuStatus: normalizedStatus,
+        payuRemoteVerify: remote.ok,
       },
     },
   });
