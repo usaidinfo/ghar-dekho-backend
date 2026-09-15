@@ -2,6 +2,8 @@ import { success, error } from '../utils/response.js';
 import { formatMembershipPayload } from '../services/membership.service.js';
 import {
   createMembershipOrder,
+  generatePayUCheckoutHash,
+  getPayULaunchPage,
   isPayUConfigured,
   verifyMembershipPayment,
 } from '../services/payment.service.js';
@@ -75,7 +77,45 @@ export const createMembershipPaymentOrder = async (req, res) => {
   }
 };
 
-/** POST/GET /api/payments/payu/success|failure — PayU browser return bridge for mobile WebView */
+/** POST /api/payments/payu/hash — CheckoutPro dynamic hash (salt stays on server) */
+export const generatePayUHash = async (req, res) => {
+  try {
+    const hashString = String(req.body?.hashString || '').trim();
+    const postSalt = req.body?.postSalt == null ? '' : String(req.body.postSalt);
+    const hash = generatePayUCheckoutHash({ hashString, postSalt });
+    return res.json(success({ hash }, 'Hash generated.'));
+  } catch (err) {
+    console.error('generatePayUHash error:', err);
+    return sendServiceError(res, err, 'Failed to generate PayU hash.');
+  }
+};
+
+/** GET /api/payments/payu/launch/:paymentId — auto-submit form for Chrome Custom Tabs */
+export const launchPayUCheckout = async (req, res) => {
+  try {
+    const paymentId = String(req.params.paymentId || '').trim();
+    const token = String(req.query.t || req.query.token || '').trim();
+    const html = await getPayULaunchPage({ paymentId, token });
+    res.removeHeader('Content-Security-Policy');
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(200).send(html);
+  } catch (err) {
+    console.error('launchPayUCheckout error:', err);
+    const status = err.status || 500;
+    return res
+      .status(status)
+      .type('html')
+      .send(
+        `<!DOCTYPE html><html><body style="font-family:sans-serif;padding:40px;text-align:center;">
+          <h3>Unable to open checkout</h3>
+          <p>${String(err.message || 'Please go back to the app and try again.')}</p>
+        </body></html>`,
+      );
+  }
+};
+
+/** POST/GET /api/payments/payu/success|failure — PayU browser return bridge for mobile */
 export const payuReturnBridge = async (req, res) => {
   try {
     const params = { ...(req.query || {}), ...(req.body || {}) };

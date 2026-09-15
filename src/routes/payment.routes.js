@@ -4,7 +4,9 @@ import { protect } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
 import {
   createMembershipPaymentOrder,
+  generatePayUHash,
   getPaymentConfig,
+  launchPayUCheckout,
   payuReturnBridge,
   verifyMembershipPaymentOrder,
 } from '../controllers/payment.controller.js';
@@ -37,7 +39,19 @@ function flattenPayUVerifyBody(req, _res, next) {
 // GET /api/payments/config
 router.get('/config', getPaymentConfig);
 
-// PayU return URLs (no auth — called by PayU / WebView)
+// POST /api/payments/payu/hash — CheckoutPro dynamic hashes (auth required)
+router.post(
+  '/payu/hash',
+  protect,
+  [body('hashString').isString().notEmpty().withMessage('hashString is required')],
+  validate,
+  generatePayUHash,
+);
+
+// GET /api/payments/payu/launch/:paymentId — public tokenized checkout for Custom Tabs
+router.get('/payu/launch/:paymentId', launchPayUCheckout);
+
+// PayU return URLs (no auth — called by PayU / browser)
 router.all('/payu/success', payuReturnBridge);
 router.all('/payu/failure', payuReturnBridge);
 
