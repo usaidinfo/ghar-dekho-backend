@@ -5,7 +5,58 @@ import { signAccessToken, signRefreshToken, verifyToken } from '../utils/jwt.js'
 import { success, error } from '../utils/response.js';
 import { createOTP, verifyOTP } from '../services/otp.service.js';
 import { sendOTPEmail, sendWelcomeEmail } from '../services/email.service.js';
-import { sendOTPSMS, isTwilioConfigured } from '../services/sms.service.js';
+import {
+  formatPhoneForMsg91,
+  getMsg91WidgetConfig,
+  isMsg91WhatsAppConfigured,
+  verifyMsg91AccessToken,
+} from '../services/msg91.service.js';
+
+function normalizePhone(phone) {
+  if (!phone) return null;
+  const phoneRaw = String(phone).trim();
+  const phoneDigits = phoneRaw.replace(/\D/g, '');
+  if (!phoneDigits) return null;
+  if (phoneRaw.startsWith('+')) return phoneRaw;
+  if (phoneDigits.length === 10) return `+91${phoneDigits}`;
+  if (phoneDigits.length >= 11) return `+${phoneDigits}`;
+  return phoneRaw;
+}
+
+async function issueAuthSession(user, req) {
+  const accessToken = signAccessToken({ userId: user.id, role: user.role });
+  const refreshToken = signRefreshToken({ userId: user.id });
+
+  await prisma.refreshToken.create({
+    data: {
+      userId: user.id,
+      token: refreshToken,
+      deviceInfo: req.headers['user-agent'] || null,
+      ipAddress: req.ip,
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    },
+  });
+
+  const { password: _, ...safeUser } = user;
+  return { user: safeUser, accessToken, refreshToken };
+}
+
+/** GET /api/auth/msg91-widget-config — public widget id + token for RN SDK */
+export const getMsg91Config = async (_req, res) => {
+  try {
+    if (!isMsg91WhatsAppConfigured()) {
+      return res
+        .status(503)
+        .json(error('MSG91 WhatsApp OTP is not configured.', null, 'MSG91_NOT_CONFIGURED'));
+    }
+    return res.json(success(getMsg91WidgetConfig(), 'MSG91 widget config'));
+  } catch (err) {
+    console.error('getMsg91Config error:', err);
+    return res
+      .status(err.status || 500)
+      .json(error(err.message || 'Failed to load MSG91 config.', null, err.code || 'SERVER_ERROR'));
+  }
+};
 
 // ─── Send OTP ────────────────────────────────────────────────
 export const sendOTP = async (req, res) => {
@@ -16,35 +67,35 @@ export const sendOTP = async (req, res) => {
       return res.status(400).json(error('Email or phone is required.'));
     }
 
-    // Normalize identifiers consistently across send / verify paths.
-    // Without this, the OTP would be stored against `9876543210` here but
-    // looked up as `+919876543210` during verifyOTP — never matching.
     const emailNorm = email ? String(email).trim().toLowerCase() : null;
-    const phoneRaw = phone ? String(phone).trim() : null;
-    const phoneDigits = phoneRaw ? phoneRaw.replace(/\D/g, '') : '';
-    const phoneNormalized = phoneRaw
-      ? phoneRaw.startsWith('+')
-        ? phoneRaw
-        : phoneDigits.length === 10
-          ? `+91${phoneDigits}`
-          : phoneDigits.length >= 11
-            ? `+${phoneDigits}`
-            : phoneRaw
-      : null;
-
-    // Phone OTP path: require Twilio, or an explicit dev/staging opt-in.
+    const phoneNormalized = normalizePhone(phone);
     const isPhoneOnly = !!phoneNormalized && !emailNorm;
-    const twilioReady = isTwilioConfigured();
+    const msg91Ready = isMsg91WhatsAppConfigured();
+
+    // Phone OTP is delivered by the MSG91 WhatsApp widget on the client.
+    // Backend only confirms the channel is ready — it does not send SMS.
     if (isPhoneOnly) {
-      const allowPhoneOtp =
-        twilioReady ||
-        process.env.NODE_ENV === 'development' ||
-        String(process.env.ALLOW_PHONE_OTP || '').toLowerCase() === 'true';
-      if (!allowPhoneOtp) {
+      if (
+        !msg91Ready &&
+        process.env.NODE_ENV === 'production' &&
+        String(process.env.ALLOW_PHONE_OTP || '').toLowerCase() !== 'true'
+      ) {
         return res
           .status(501)
           .json(error('Phone OTP is not enabled on this server yet.', null, 'PHONE_OTP_PENDING'));
       }
+
+      return res.json(
+        success(
+          {
+            channel: 'MSG91_WHATSAPP',
+            widgetRequired: true,
+            phone: phoneNormalized,
+            msg91Phone: formatPhoneForMsg91(phoneNormalized),
+          },
+          'Send OTP via WhatsApp using the MSG91 widget on the client.',
+        ),
+      );
     }
 
     const otp = await createOTP({
@@ -53,35 +104,14 @@ export const sendOTP = async (req, res) => {
       type,
     });
 
-    // Email channel
     if (emailNorm) {
       await sendOTPEmail(emailNorm, otp, type);
     }
 
-    // SMS channel (Twilio)
-    let smsError = null;
-    if (phoneNormalized && twilioReady) {
-      const smsRes = await sendOTPSMS(phoneNormalized, otp, type);
-      if (!smsRes.ok) {
-        smsError = smsRes.reason;
-        // Hard-fail in production — we don't want to lie to the user about
-        // having sent something we didn't. In dev we still surface the OTP
-        // via devData below so engineering work isn't blocked.
-        if (process.env.NODE_ENV === 'production') {
-          return res
-            .status(502)
-            .json(error(`Failed to deliver OTP via SMS: ${smsError}`, null, 'SMS_DELIVERY_FAILED'));
-        }
-      }
-    }
-
-    // In development (or when explicitly enabled), return OTP directly for
-    // easy testing. Never expose in production unless RETURN_OTP_IN_RESPONSE
-    // is explicitly set to true.
     const exposeOtp =
       process.env.NODE_ENV === 'development' ||
       String(process.env.RETURN_OTP_IN_RESPONSE || '').toLowerCase() === 'true';
-    const devData = exposeOtp ? { otp, ...(smsError ? { smsError } : {}) } : {};
+    const devData = exposeOtp ? { otp, channel: 'EMAIL' } : { channel: 'EMAIL' };
 
     return res.json(
       success(devData, `OTP sent successfully to ${emailNorm || phoneNormalized}`),
@@ -270,39 +300,68 @@ export const loginWithPassword = async (req, res) => {
 // ─── Login with OTP ───────────────────────────────────────────
 export const loginWithOTP = async (req, res) => {
   try {
-    const { email, phone, otp } = req.body;
+    const { email, phone, otp, accessToken } = req.body;
 
     const emailNorm = email ? String(email).trim().toLowerCase() : null;
-    const phoneRaw = phone ? String(phone).trim() : null;
-    const phoneDigits = phoneRaw ? phoneRaw.replace(/\D/g, '') : '';
-    const phoneNormalized = phoneRaw
-      ? (phoneRaw.startsWith('+')
-          ? phoneRaw
-          : phoneDigits.length === 10
-            ? `+91${phoneDigits}`
-            : phoneDigits.length >= 11
-              ? `+${phoneDigits}`
-              : phoneRaw)
-      : null;
+    let phoneNormalized = normalizePhone(phone);
 
-    // LOGIN OTP is stored against whichever identifier was used to send it.
-    const otpResult = await verifyOTP({ email: emailNorm, phone: phoneNormalized, otp, type: 'LOGIN' });
-    if (!otpResult.valid) {
-      return res.status(400).json(error(otpResult.reason, null, 'INVALID_OTP'));
+    // Phone WhatsApp path: MSG91 widget already verified the OTP client-side.
+    // We only re-check the access-token with MSG91, then issue our JWT session.
+    if (accessToken) {
+      if (!phoneNormalized) {
+        return res.status(400).json(error('Phone is required for WhatsApp OTP login.'));
+      }
+
+      const verified = await verifyMsg91AccessToken(accessToken);
+      if (!verified.ok) {
+        return res
+          .status(401)
+          .json(error(verified.reason || 'WhatsApp OTP verification failed.', null, 'INVALID_OTP'));
+      }
+
+      if (verified.phone) {
+        const verifiedNorm = normalizePhone(verified.phone);
+        if (verifiedNorm) phoneNormalized = verifiedNorm;
+      }
+    } else {
+      if (!otp) {
+        return res.status(400).json(error('OTP required.', null, 'MISSING_OTP'));
+      }
+
+      const otpResult = await verifyOTP({
+        email: emailNorm,
+        phone: phoneNormalized,
+        otp,
+        type: 'LOGIN',
+      });
+      if (!otpResult.valid) {
+        return res.status(400).json(error(otpResult.reason, null, 'INVALID_OTP'));
+      }
     }
 
     let user = await prisma.user.findFirst({
       where: {
         OR: [
           ...(emailNorm ? [{ email: emailNorm }] : []),
-          ...(phoneNormalized ? [{ phone: phoneNormalized }] : []),
+          ...(phoneNormalized
+            ? [
+                { phone: phoneNormalized },
+                { phone: phoneNormalized.replace(/^\+/, '') },
+                ...(String(phoneNormalized).replace(/\D/g, '').length >= 10
+                  ? [
+                      {
+                        phone: `+${String(phoneNormalized).replace(/\D/g, '')}`,
+                      },
+                    ]
+                  : []),
+              ]
+            : []),
         ],
       },
       include: { profile: true },
     });
 
     if (!user) {
-      // Auto-create user for OTP-only onboarding (no password required).
       const suffix = uuidv4().slice(0, 6);
       user = await prisma.user.create({
         data: {
@@ -329,29 +388,17 @@ export const loginWithOTP = async (req, res) => {
 
     await prisma.user.update({
       where: { id: user.id },
-      data:  {
-        lastLoginAt:     new Date(),
-        lastLoginIp:     req.ip,
-        isEmailVerified: email ? true : user.isEmailVerified,
-        isPhoneVerified: phone ? true : user.isPhoneVerified,
-      },
-    });
-
-    const accessToken  = signAccessToken({ userId: user.id, role: user.role });
-    const refreshToken = signRefreshToken({ userId: user.id });
-
-    await prisma.refreshToken.create({
       data: {
-        userId:     user.id,
-        token:      refreshToken,
-        deviceInfo: req.headers['user-agent'] || null,
-        ipAddress:  req.ip,
-        expiresAt:  new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        lastLoginAt: new Date(),
+        lastLoginIp: req.ip,
+        isEmailVerified: emailNorm ? true : user.isEmailVerified,
+        isPhoneVerified: phoneNormalized ? true : user.isPhoneVerified,
+        ...(phoneNormalized && !user.phone ? { phone: phoneNormalized } : {}),
       },
     });
 
-    const { password: _, ...safeUser } = user;
-    return res.json(success({ user: safeUser, accessToken, refreshToken }, 'Login successful!'));
+    const session = await issueAuthSession(user, req);
+    return res.json(success(session, 'Login successful!'));
   } catch (err) {
     console.error('loginWithOTP error:', err);
     return res.status(500).json(error('Login failed.'));
@@ -467,30 +514,38 @@ export const forgotPassword = async (req, res) => {
     }
 
     const emailNorm = email ? String(email).trim().toLowerCase() : null;
-    const phoneRaw = phone ? String(phone).trim() : null;
-    const phoneDigits = phoneRaw ? phoneRaw.replace(/\D/g, '') : '';
-    const phoneNormalized = phoneRaw
-      ? phoneRaw.startsWith('+')
-        ? phoneRaw
-        : phoneDigits.length === 10
-          ? `+91${phoneDigits}`
-          : phoneDigits.length >= 11
-            ? `+${phoneDigits}`
-            : phoneRaw
-      : null;
-
+    const phoneNormalized = normalizePhone(phone);
     const isPhoneOnly = !!phoneNormalized && !emailNorm;
-    const twilioReady = isTwilioConfigured();
-    if (isPhoneOnly && !twilioReady && process.env.NODE_ENV === 'production') {
-      return res
-        .status(501)
-        .json(
-          error(
-            'Phone OTP is not enabled on this server yet. Please use email for password reset.',
-            null,
-            'PHONE_OTP_PENDING',
-          ),
-        );
+    const msg91Ready = isMsg91WhatsAppConfigured();
+
+    if (isPhoneOnly) {
+      if (
+        !msg91Ready &&
+        process.env.NODE_ENV === 'production' &&
+        String(process.env.ALLOW_PHONE_OTP || '').toLowerCase() !== 'true'
+      ) {
+        return res
+          .status(501)
+          .json(
+            error(
+              'Phone OTP is not enabled on this server yet. Please use email for password reset.',
+              null,
+              'PHONE_OTP_PENDING',
+            ),
+          );
+      }
+
+      return res.json(
+        success(
+          {
+            channel: 'MSG91_WHATSAPP',
+            widgetRequired: true,
+            phone: phoneNormalized,
+            msg91Phone: formatPhoneForMsg91(phoneNormalized),
+          },
+          'Verify phone via WhatsApp OTP widget, then reset password.',
+        ),
+      );
     }
 
     const user = await prisma.user.findFirst({
@@ -500,7 +555,7 @@ export const forgotPassword = async (req, res) => {
           ...(phoneNormalized
             ? [
                 { phone: phoneNormalized },
-                ...(phoneDigits ? [{ phone: phoneDigits }, { phone: `+${phoneDigits}` }] : []),
+                { phone: phoneNormalized.replace(/^\+/, '') },
               ]
             : []),
         ],
@@ -523,23 +578,10 @@ export const forgotPassword = async (req, res) => {
       await sendOTPEmail(emailNorm, otp, 'PASSWORD_RESET');
     }
 
-    let smsError = null;
-    if (phoneNormalized && twilioReady) {
-      const smsRes = await sendOTPSMS(phoneNormalized, otp, 'PASSWORD_RESET');
-      if (!smsRes.ok) {
-        smsError = smsRes.reason;
-        if (process.env.NODE_ENV === 'production' && isPhoneOnly) {
-          return res
-            .status(502)
-            .json(error(`Failed to deliver OTP via SMS: ${smsError}`, null, 'SMS_DELIVERY_FAILED'));
-        }
-      }
-    }
-
     const exposeOtp =
       process.env.NODE_ENV === 'development' ||
       String(process.env.RETURN_OTP_IN_RESPONSE || '').toLowerCase() === 'true';
-    const devData = exposeOtp ? { otp, ...(smsError ? { smsError } : {}) } : {};
+    const devData = exposeOtp ? { otp, channel: 'EMAIL' } : { channel: 'EMAIL' };
     return res.json(success(devData, 'OTP sent for password reset.'));
   } catch (err) {
     console.error('forgotPassword error:', err);

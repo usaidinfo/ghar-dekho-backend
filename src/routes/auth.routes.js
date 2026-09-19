@@ -13,9 +13,13 @@ import {
   changePassword,
   forgotPassword,
   resetPassword,
+  getMsg91Config,
 } from '../controllers/auth.controller.js';
 
 const router = Router();
+
+// GET /api/auth/msg91-widget-config
+router.get('/msg91-widget-config', getMsg91Config);
 
 // POST /api/auth/send-otp
 router.post(
@@ -65,9 +69,19 @@ router.post(
   '/login-otp',
   authLimiter,
   [
-    body('otp').notEmpty().withMessage('OTP required'),
+    body('otp').optional().isString(),
+    body('accessToken').optional().isString(),
     body('email').optional().isEmail(),
     body('phone').optional().isMobilePhone(),
+    body().custom((_, { req }) => {
+      if (!req.body?.otp && !req.body?.accessToken) {
+        throw new Error('OTP or accessToken is required');
+      }
+      if (!req.body?.email && !req.body?.phone) {
+        throw new Error('Email or phone is required');
+      }
+      return true;
+    }),
   ],
   validate,
   loginWithOTP
