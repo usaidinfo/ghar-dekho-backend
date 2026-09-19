@@ -9,8 +9,8 @@ export const createOTP = async ({ userId = null, email = null, phone = null, typ
   await prisma.oTPVerification.updateMany({
     where: {
       ...(userId && { userId }),
-      ...(email  && { email }),
-      ...(phone  && { phone }),
+      ...(email && { email }),
+      ...(phone && { phone }),
       type,
       isVerified: false,
     },
@@ -43,7 +43,7 @@ export const verifyOTP = async ({ email = null, phone = null, otp, type }) => {
       otp,
       type,
       isVerified: false,
-      expiresAt:  { gt: new Date() },
+      expiresAt: { gt: new Date() },
     },
     orderBy: { createdAt: 'desc' },
   });
@@ -53,7 +53,7 @@ export const verifyOTP = async ({ email = null, phone = null, otp, type }) => {
   // Increment attempt count
   await prisma.oTPVerification.update({
     where: { id: record.id },
-    data:  { isVerified: true },
+    data: { isVerified: true },
   });
 
   return { valid: true, record };

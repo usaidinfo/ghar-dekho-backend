@@ -136,20 +136,20 @@ export const register = async (req, res) => {
     const phoneDigits = phoneRaw ? phoneRaw.replace(/\D/g, '') : '';
     const phoneNormalized = phoneRaw
       ? (phoneRaw.startsWith('+')
-          ? phoneRaw
-          : phoneDigits.length === 10
-            ? `+91${phoneDigits}`
-            : phoneDigits.length >= 11
-              ? `+${phoneDigits}`
-              : phoneRaw)
+        ? phoneRaw
+        : phoneDigits.length === 10
+          ? `+91${phoneDigits}`
+          : phoneDigits.length >= 11
+            ? `+${phoneDigits}`
+            : phoneRaw)
       : null;
     const phoneVariants = phoneRaw
       ? Array.from(new Set([
-          phoneRaw,
-          phoneDigits,
-          phoneDigits.length === 10 ? `+91${phoneDigits}` : null,
-          phoneDigits.length >= 11 ? `+${phoneDigits}` : null,
-        ].filter(Boolean)))
+        phoneRaw,
+        phoneDigits,
+        phoneDigits.length === 10 ? `+91${phoneDigits}` : null,
+        phoneDigits.length >= 11 ? `+${phoneDigits}` : null,
+      ].filter(Boolean)))
       : [];
 
     const otpType = emailNorm ? 'EMAIL_VERIFICATION' : 'PHONE_VERIFICATION';
@@ -182,25 +182,25 @@ export const register = async (req, res) => {
       data: {
         email: emailNorm,
         phone: phoneNormalized,
-        password:         hashedPassword,
-        isEmailVerified:  !!emailNorm,
-        isPhoneVerified:  !!phoneNormalized,
-        role:             profileType === 'AGENT' || profileType === 'BROKER' ? 'AGENT' : 'USER',
+        password: hashedPassword,
+        isEmailVerified: !!emailNorm,
+        isPhoneVerified: !!phoneNormalized,
+        role: profileType === 'AGENT' || profileType === 'BROKER' ? 'AGENT' : 'USER',
         profileType,
         profile: {
           create: { firstName, lastName },
         },
       },
       select: {
-        id:              true,
-        email:           true,
-        phone:           true,
-        role:            true,
-        profileType:     true,
+        id: true,
+        email: true,
+        phone: true,
+        role: true,
+        profileType: true,
         isEmailVerified: true,
         isPhoneVerified: true,
-        profile:         true,
-        createdAt:       true,
+        profile: true,
+        createdAt: true,
       },
     });
 
@@ -209,17 +209,17 @@ export const register = async (req, res) => {
       sendWelcomeEmail(email, firstName).catch(console.error);
     }
 
-    const accessToken  = signAccessToken({ userId: user.id, role: user.role });
+    const accessToken = signAccessToken({ userId: user.id, role: user.role });
     const refreshToken = signRefreshToken({ userId: user.id });
 
     // Store refresh token
     await prisma.refreshToken.create({
       data: {
-        userId:     user.id,
-        token:      refreshToken,
+        userId: user.id,
+        token: refreshToken,
         deviceInfo: req.headers['user-agent'] || null,
-        ipAddress:  req.ip,
-        expiresAt:  new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
+        ipAddress: req.ip,
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
       },
     });
 
@@ -239,11 +239,11 @@ export const loginWithPassword = async (req, res) => {
     const phoneDigits = phoneRaw ? phoneRaw.replace(/\D/g, '') : '';
     const phoneVariants = phoneRaw
       ? Array.from(new Set([
-          phoneRaw,
-          phoneDigits,
-          phoneDigits.length === 10 ? `+91${phoneDigits}` : null,
-          phoneDigits.length >= 11 ? `+${phoneDigits}` : null,
-        ].filter(Boolean)))
+        phoneRaw,
+        phoneDigits,
+        phoneDigits.length === 10 ? `+91${phoneDigits}` : null,
+        phoneDigits.length >= 11 ? `+${phoneDigits}` : null,
+      ].filter(Boolean)))
       : [];
 
     const user = await prisma.user.findFirst({
@@ -273,19 +273,19 @@ export const loginWithPassword = async (req, res) => {
 
     await prisma.user.update({
       where: { id: user.id },
-      data:  { lastLoginAt: new Date(), lastLoginIp: req.ip },
+      data: { lastLoginAt: new Date(), lastLoginIp: req.ip },
     });
 
-    const accessToken  = signAccessToken({ userId: user.id, role: user.role });
+    const accessToken = signAccessToken({ userId: user.id, role: user.role });
     const refreshToken = signRefreshToken({ userId: user.id });
 
     await prisma.refreshToken.create({
       data: {
-        userId:     user.id,
-        token:      refreshToken,
+        userId: user.id,
+        token: refreshToken,
         deviceInfo: req.headers['user-agent'] || null,
-        ipAddress:  req.ip,
-        expiresAt:  new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        ipAddress: req.ip,
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
       },
     });
 
@@ -431,21 +431,21 @@ export const refreshAccessToken = async (req, res) => {
       return res.status(403).json(error('Account access denied.'));
     }
 
-    const newAccessToken  = signAccessToken({ userId: user.id, role: user.role });
+    const newAccessToken = signAccessToken({ userId: user.id, role: user.role });
     const newRefreshToken = signRefreshToken({ userId: user.id });
 
     // Rotate: revoke old, create new
     await prisma.refreshToken.update({
       where: { id: storedToken.id },
-      data:  { isRevoked: true },
+      data: { isRevoked: true },
     });
     await prisma.refreshToken.create({
       data: {
-        userId:     user.id,
-        token:      newRefreshToken,
+        userId: user.id,
+        token: newRefreshToken,
         deviceInfo: req.headers['user-agent'] || null,
-        ipAddress:  req.ip,
-        expiresAt:  new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        ipAddress: req.ip,
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
       },
     });
 
@@ -463,7 +463,7 @@ export const logout = async (req, res) => {
     if (refreshToken) {
       await prisma.refreshToken.updateMany({
         where: { token: refreshToken, userId: req.user.id },
-        data:  { isRevoked: true },
+        data: { isRevoked: true },
       });
     }
     return res.json(success(null, 'Logged out successfully.'));
@@ -489,13 +489,13 @@ export const changePassword = async (req, res) => {
     const hashedPassword = await bcrypt.hash(newPassword, 12);
     await prisma.user.update({
       where: { id: req.user.id },
-      data:  { password: hashedPassword },
+      data: { password: hashedPassword },
     });
 
     // Revoke all refresh tokens for security
     await prisma.refreshToken.updateMany({
       where: { userId: req.user.id },
-      data:  { isRevoked: true },
+      data: { isRevoked: true },
     });
 
     return res.json(success(null, 'Password changed successfully.'));
@@ -556,6 +556,9 @@ export const forgotPassword = async (req, res) => {
             ? [
                 { phone: phoneNormalized },
                 { phone: phoneNormalized.replace(/^\+/, '') },
+                ...(String(phoneNormalized).replace(/\D/g, '').length >= 10
+                  ? [{ phone: `+${String(phoneNormalized).replace(/\D/g, '')}` }]
+                  : []),
               ]
             : []),
         ],

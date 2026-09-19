@@ -21,11 +21,17 @@ export function isPayUConfigured() {
   );
 }
 
+const PAYU_TEST_SIMULATOR_URL = 'https://test-payment-middleware.payu.in/simulatorResponse';
+
 function getPublicApiBase() {
   const configured = String(process.env.PUBLIC_API_URL || process.env.API_PUBLIC_URL || '').trim();
   if (configured) return configured.replace(/\/+$/, '');
   const port = process.env.PORT || 5000;
   return `http://localhost:${port}`;
+}
+
+function isLocalPublicBase(url) {
+  return /localhost|127\.0\.0\.1|192\.168\.|10\.\d+\.|172\.(1[6-9]|2\d|3[01])\./i.test(String(url || ''));
 }
 
 function getPayUConfig() {
@@ -41,6 +47,10 @@ function getPayUConfig() {
   const mode =
     String(process.env.PAYU_MODE || 'test').trim().toLowerCase() === 'live' ? 'live' : 'test';
   const publicBase = getPublicApiBase();
+  const explicitSuccess = String(process.env.PAYU_SUCCESS_URL || '').trim();
+  const explicitFailure = String(process.env.PAYU_FAILURE_URL || '').trim();
+  const useTestSimulator =
+    mode === 'test' && !explicitSuccess && !explicitFailure && isLocalPublicBase(publicBase);
 
   return {
     key,
@@ -53,11 +63,15 @@ function getPayUConfig() {
         ? 'https://info.payu.in/merchant/postservice?form=2'
         : 'https://test.payu.in/merchant/postservice?form=2',
     successUrl:
-      String(process.env.PAYU_SUCCESS_URL || '').trim() ||
-      `${publicBase}/api/payments/payu/success`,
+      explicitSuccess ||
+      (useTestSimulator
+        ? PAYU_TEST_SIMULATOR_URL
+        : `${publicBase}/api/payments/payu/success`),
     failureUrl:
-      String(process.env.PAYU_FAILURE_URL || '').trim() ||
-      `${publicBase}/api/payments/payu/failure`,
+      explicitFailure ||
+      (useTestSimulator
+        ? PAYU_TEST_SIMULATOR_URL
+        : `${publicBase}/api/payments/payu/failure`),
   };
 }
 
@@ -171,6 +185,114 @@ function buildTxnId(paymentId) {
   return `gd${compact}`.slice(0, 25);
 }
 
+export function buildPayULaunchToken(paymentId) {
+  const secret = String(process.env.JWT_SECRET || 'ghar-dekho-payu').trim();
+  return crypto
+    .createHmac('sha256', secret)
+    .update(`payu-launch:${paymentId}`)
+    .digest('hex')
+    .slice(0, 32);
+}
+
+/**
+ * CheckoutPro dynamic hash: sha512(hashString + salt + postSalt)
+ * hashString is provided by the SDK (already includes everything except salt).
+ */
+export function generatePayUCheckoutHash({ hashString, postSalt = '' }) {
+  if (!isPayUConfigured()) {
+    const err = new Error('PayU is not configured on the server.');
+    err.status = 503;
+    err.code = 'PAYU_NOT_CONFIGURED';
+    throw err;
+  }
+  const base = String(hashString || '');
+  if (!base) {
+    const err = new Error('hashString is required.');
+    err.status = 400;
+    err.code = 'INVALID_HASH_STRING';
+    throw err;
+  }
+  const salt = process.env.PAYU_MERCHANT_SALT.trim();
+  const suffix = postSalt == null ? '' : String(postSalt);
+  return sha512(`${base}${salt}${suffix}`);
+}
+
+export function verifyPayULaunchToken(paymentId, token) {
+  if (!paymentId || !token) return false;
+  const expected = buildPayULaunchToken(paymentId);
+  try {
+    return timingSafeEqualHex(expected, String(token).trim());
+  } catch {
+    return expected === String(token).trim();
+  }
+}
+
+/**
+ * HTML auto-submit page for Chrome Custom Tabs (UPI apps work there; not in WebView).
+ */
+export async function getPayULaunchPage({ paymentId, token }) {
+  if (!verifyPayULaunchToken(paymentId, token)) {
+    const err = new Error('Invalid or expired checkout link.');
+    err.status = 403;
+    err.code = 'INVALID_LAUNCH_TOKEN';
+    throw err;
+  }
+
+  const payment = await prisma.paymentTransaction.findUnique({
+    where: { id: paymentId },
+  });
+  if (!payment || payment.provider !== 'PAYU') {
+    const err = new Error('Payment not found.');
+    err.status = 404;
+    err.code = 'PAYMENT_NOT_FOUND';
+    throw err;
+  }
+  if (payment.status !== 'CREATED') {
+    const err = new Error('This payment is no longer available for checkout.');
+    err.status = 409;
+    err.code = 'PAYMENT_NOT_CHECKOUTABLE';
+    throw err;
+  }
+
+  const meta = payment.metadata && typeof payment.metadata === 'object' ? payment.metadata : {};
+  const payuParams = meta.payuParams && typeof meta.payuParams === 'object' ? meta.payuParams : null;
+  const paymentUrl = String(meta.paymentUrl || '').trim();
+  if (!payuParams || !paymentUrl) {
+    const err = new Error('Checkout details missing for this payment.');
+    err.status = 500;
+    err.code = 'MISSING_CHECKOUT_PARAMS';
+    throw err;
+  }
+
+  const inputs = Object.entries(payuParams)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([key, value]) => {
+      const safe = String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;');
+      return `<input type="hidden" name="${key}" value="${safe}" />`;
+    })
+    .join('\n');
+
+  return `<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PayU Checkout</title>
+  </head>
+  <body onload="document.forms[0].submit()">
+    <p style="font-family: sans-serif; text-align: center; margin-top: 48px;">
+      Redirecting to PayU…
+    </p>
+    <form action="${paymentUrl.replace(/"/g, '&quot;')}" method="post">
+      ${inputs}
+    </form>
+  </body>
+</html>`;
+}
+
 async function resolveCheckoutPlan({ userId, mode, accountType, planTier }) {
   if (mode === 'activate') {
     if (!VALID_ACCOUNT_TYPES.has(accountType) || !VALID_PLAN_TIERS.has(planTier)) {
@@ -279,7 +401,7 @@ async function loadCheckoutUser(userId) {
     'Customer';
   const email =
     String(user.email || '').trim() ||
-    `${String(user.id).replace(/-/g, '').slice(0, 12)}@ghardekho.local`;
+    `user${String(user.id).replace(/-/g, '').slice(0, 12)}@example.com`;
   const phoneDigits = String(user.phone || '').replace(/\D/g, '');
   const phone =
     phoneDigits.length >= 10 ? phoneDigits.slice(-10) : phoneDigits || '9999999999';
@@ -376,7 +498,6 @@ export async function createMembershipOrder({
       udf3,
       udf4,
       udf5,
-      service_provider: 'payu_paisa',
     };
 
     await prisma.paymentTransaction.update({
@@ -397,9 +518,15 @@ export async function createMembershipOrder({
             email,
             phone,
           },
+          // Full checkout form for Chrome Custom Tabs launch page
+          payuParams,
+          paymentUrl: payu.paymentUrl,
+          launchToken: buildPayULaunchToken(payment.id),
         },
       },
     });
+
+    const launchToken = buildPayULaunchToken(payment.id);
 
     return {
       paymentId: payment.id,
@@ -423,6 +550,8 @@ export async function createMembershipOrder({
       udf4,
       udf5,
       paymentUrl: payu.paymentUrl,
+      launchToken,
+      launchPath: `/api/payments/payu/launch/${payment.id}?t=${launchToken}`,
       provider: 'PAYU',
       mode: resolved.mode,
       environment: payu.mode,
@@ -594,24 +723,31 @@ export async function verifyMembershipPayment({
   const meta = payment.metadata && typeof payment.metadata === 'object' ? payment.metadata : {};
   const stored = meta.payu && typeof meta.payu === 'object' ? meta.payu : {};
 
-  // Reverse hash must use the exact values PayU echoed in the response.
-  verifyPayUResponseHash({
-    status,
-    hash,
-    amount: String(amount),
-    txnid: String(txnid),
-    email: String(email ?? stored.email ?? ''),
-    firstname: String(firstname ?? stored.firstname ?? ''),
-    productinfo: String(productinfo ?? stored.productinfo ?? ''),
-    udf1: String(udf1 ?? payment.id ?? ''),
-    udf2: String(udf2 ?? meta.mode ?? ''),
-    udf3: String(udf3 ?? meta.accountType ?? ''),
-    udf4: String(udf4 ?? meta.planTier ?? ''),
-    udf5: String(udf5 ?? meta.planId ?? ''),
-  });
+  // Hosted checkout returns reverse hash; CheckoutPro SDK may omit/differ.
+  // Prefer signature when valid; otherwise require live verify_payment confirmation.
+  let signatureOk = false;
+  try {
+    verifyPayUResponseHash({
+      status,
+      hash,
+      amount: String(amount),
+      txnid: String(txnid),
+      email: String(email ?? stored.email ?? ''),
+      firstname: String(firstname ?? stored.firstname ?? ''),
+      productinfo: String(productinfo ?? stored.productinfo ?? ''),
+      udf1: String(udf1 ?? payment.id ?? ''),
+      udf2: String(udf2 ?? meta.mode ?? ''),
+      udf3: String(udf3 ?? meta.accountType ?? ''),
+      udf4: String(udf4 ?? meta.planTier ?? ''),
+      udf5: String(udf5 ?? meta.planId ?? ''),
+    });
+    signatureOk = true;
+  } catch {
+    signatureOk = false;
+  }
 
   const normalizedStatus = String(status).toLowerCase();
-  if (!SUCCESS_STATUSES.has(normalizedStatus)) {
+  if (!SUCCESS_STATUSES.has(normalizedStatus) && normalizedStatus !== 'completed') {
     await prisma.paymentTransaction.update({
       where: { id: payment.id },
       data: {
@@ -634,6 +770,17 @@ export async function verifyMembershipPayment({
   }
 
   const remote = await verifyPayUTransactionStatus(txnid);
+  if (!signatureOk && remote.ok !== true) {
+    const err = new Error(
+      remote.ok === false
+        ? 'PayU could not confirm this payment.'
+        : 'Invalid payment signature and PayU status could not be confirmed.',
+    );
+    err.status = 400;
+    err.code = remote.ok === false ? 'PAYMENT_NOT_CONFIRMED' : 'INVALID_SIGNATURE';
+    err.meta = { payuStatus: remote.status || null };
+    throw err;
+  }
   if (remote.ok === false) {
     const err = new Error('PayU could not confirm this payment.');
     err.status = 400;
